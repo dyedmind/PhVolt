@@ -1,22 +1,33 @@
-import io
-import os
-import re
 from datetime import datetime
-from itertools import cycle
+import inspect
+import io
 from pathlib import Path
-import matplotlib.image as mpimg
-from matplotlib.lines import Line2D
-from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-import numpy as np
-import pandas as pd
 import streamlit as st
 
-# ==============================================================================
-# CONFIGURAÇÃO GERAL DA PÁGINA E MATPLOTLIB
-# ==============================================================================
+from core import (
+    PALETAS_DISPONIVEIS,
+    TEXTOS_PADRAO,
+    calcular_resumo_parametros,
+    exportar_txt_compativel_mpr,
+    identificar_amostras,
+    listar_ciclos_disponiveis_mpr,
+    obter_tema_visual,
+    processar_cabecalho_e_dados,
+)
+from tecnicas import (
+    gerar_plot_bet,
+    gerar_plot_bode,
+    gerar_plot_ciclabilidade,
+    gerar_plot_ciclabilidade_eficiencia,
+    gerar_plot_cv,
+    gerar_plot_eie,
+    gerar_plot_gcd,
+    gerar_plot_rate,
+    gerar_plot_sc_2e,
+    gerar_plot_sc_3e,
+)
+
 caminho_icone = Path(__file__).resolve().parent / "vikavolt.ico"
 icone_pagina = str(caminho_icone) if caminho_icone.exists() else "⚡"
 
@@ -36,2221 +47,819 @@ plt.rcParams.update(
     }
 )
 
-PALETAS_DISPONIVEIS = {
-    "PhVolt Padrão": [
-        "#f97316", "#334155", "#8b5cf6", "#0284c7", "#10b981", "#e11d48", "#d97706"
-    ],
-    "Deep (Seaborn Modern)": [
-        "#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860", "#da8bc3"
-    ],
-    "Tableau 10": [
-        "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1"
-    ],
-    "Dark2 (Alto Contraste)": [
-        "#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d"
-    ],
-    "Set1 (Cores Vivas)": [
-        "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#ffff33", "#a65628"
-    ],
-    "Viridis (Perceptual)": [
-        "#440154", "#414487", "#2a788e", "#22a884", "#7ad151", "#fde725", "#35b779"
-    ],
-    "Monocromático / Escala de Cinza": [
-        "#0f172a", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1"
-    ],
-}
 
-MARCADORES_PADRAO = ["o", "s", "^", "D", "v", "P", "*"]
+def _converter_float(val_str):
+    if val_str and val_str.strip():
+        try:
+            return float(val_str.replace(",", "."))
+        except ValueError:
+            return None
+    return None
 
-TEXTOS_PADRAO = {
-    "Português": {
-        "cv_x": r"$\mathbf{Potencial\ vs\ Li/Li^+\ (V)}$",
-        "cv_y": r"$\mathbf{Corrente\ (mA)}$",
-        "cv_charge": "Carga →",
-        "cv_discharge": "← Descarga",
-        "eie_x": r"$\mathbf{Z_{Real}\ (\Omega)}$",
-        "eie_y": r"$\mathbf{-Z_{Im}\ (\Omega)}$",
-        "eie_inset": "Região de altas frequências",
-        "gcd_x": r"$\mathbf{Capacidade\ Específica\ (mAh\ g_S^{-1})}$",
-        "gcd_y": r"$\mathbf{Potencial\ vs\ Li/Li^+\ (V)}$",
-        "rate_x": r"$\mathbf{Número\ de\ Ciclos}$",
-        "rate_y": r"$\mathbf{Capacidade\ Específica\ (mAh\ g_S^{-1})}$",
-        "ciclabilidade_x": r"$\mathbf{Número\ de\ Ciclos}$",
-        "ciclabilidade_y": r"$\mathbf{Capacidade\ Específica\ (mAh\ g_S^{-1})}$",
-        "ciclabilidade_rate": "Taxa: 0,5 C",
-        "ce_x": r"$\mathbf{Número\ de\ Ciclos}$",
-        "ce_y1": r"$\mathbf{Capacidade\ de\ Descarga\ (mAh\ g_S^{-1})}$",
-        "ce_y2": r"$\mathbf{Eficiência\ Coulômbica\ (\%)}$",
-        "sc_2e_x": r"$\mathbf{Tempo\ (s)}$",
-        "sc_2e_y": r"$\mathbf{Potencial\ da\ Célula\ (V)}$",
-        "sc_3e_x": r"$\mathbf{Tempo\ (s)}$",
-        "sc_3e_y1": r"$\mathbf{Potencial\ da\ Célula\ -\ E_{cell}\ (V)}$",
-        "sc_3e_y2": r"$\mathbf{Potencial\ dos\ Eletrodos\ -\ E_{we},\ E_{ce}\ (V)}$",
-        "sc_rate_x": r"$\mathbf{Número\ de\ Ciclos}$",
-        "sc_rate_y": r"$\mathbf{Capacitância\ Específica\ (F\ g^{-1})}$",
-        "bet_x": r"$\mathbf{Pressão\ Relativa\ (p/p_0)}$",
-        "bet_y": r"$\mathbf{Quantidade\ Adsorvida\ (cm^3\ g^{-1}\ STP)}$",
-        "bet_ads": "Adsorção (fechado)",
-        "bet_des": "Dessorção (aberto)",
-        "bet_inset": "Região de baixo volume de poros",
-        "bet_legenda": r"$\mathbf{Amostra}$",
-        "bet_legenda_area": r"$\mathbf{Amostra\ (S_{BET})}$",
-    },
-    "Inglês": {
-        "cv_x": r"$\mathbf{Potential\ vs\ Li/Li^+\ (V)}$",
-        "cv_y": r"$\mathbf{Current\ (mA)}$",
-        "cv_charge": "Charge →",
-        "cv_discharge": "← Discharge",
-        "eie_x": r"$\mathbf{Z_{Real}\ (\Omega)}$",
-        "eie_y": r"$\mathbf{-Z_{Im}\ (\Omega)}$",
-        "eie_inset": "High-frequency region",
-        "gcd_x": r"$\mathbf{Specific\ Capacity\ (mAh\ g_S^{-1})}$",
-        "gcd_y": r"$\mathbf{Potential\ vs\ Li/Li^+\ (V)}$",
-        "rate_x": r"$\mathbf{Cycle\ Number}$",
-        "rate_y": r"$\mathbf{Specific\ Capacity\ (mAh\ g_S^{-1})}$",
-        "ciclabilidade_x": r"$\mathbf{Cycle\ Number}$",
-        "ciclabilidade_y": r"$\mathbf{Specific\ Capacity\ (mAh\ g_S^{-1})}$",
-        "ciclabilidade_rate": "Rate: 0.5 C",
-        "ce_x": r"$\mathbf{Cycle\ Number}$",
-        "ce_y1": r"$\mathbf{Discharge\ Capacity\ (mAh\ g_S^{-1})}$",
-        "ce_y2": r"$\mathbf{Coulombic\ Efficiency\ (\%)}$",
-        "sc_2e_x": r"$\mathbf{Time\ (s)}$",
-        "sc_2e_y": r"$\mathbf{Cell\ Potential\ (V)}$",
-        "sc_3e_x": r"$\mathbf{Time\ (s)}$",
-        "sc_3e_y1": r"$\mathbf{Cell\ Potential\ -\ E_{cell}\ (V)}$",
-        "sc_3e_y2": r"$\mathbf{Electrode\ Potential\ -\ E_{we},\ E_{ce}\ (V)}$",
-        "sc_rate_x": r"$\mathbf{Cycle\ Number}$",
-        "sc_rate_y": r"$\mathbf{Specific\ Capacitance\ (F\ g^{-1})}$",
-        "bet_x": r"$\mathbf{Relative\ Pressure\ (p/p_0)}$",
-        "bet_y": r"$\mathbf{Quantity\ Adsorbed\ (cm^3\ g^{-1}\ STP)}$",
-        "bet_ads": "Adsorption (closed)",
-        "bet_des": "Desorption (open)",
-        "bet_inset": "Low-pore volume region",
-        "bet_legenda": r"$\mathbf{Sample}$",
-        "bet_legenda_area": r"$\mathbf{Sample\ (S_{BET})}$",
-    },
-}
 
+def _chamar_plot_seguro(fn, *args, **kwargs):
+    sig = inspect.signature(fn).parameters
+    aceita_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.values())
+    if aceita_var_kw:
+        return fn(*args, **kwargs)
+    kwargs_filtrados = {k: v for k, v in kwargs.items() if k in sig}
+    return fn(*args, **kwargs_filtrados)
 
-# ==============================================================================
-# FORMATAÇÃO DE NÚMEROS POR IDIOMA (VÍRGULA EM PT, PONTO EM EN)
-# ==============================================================================
-def fmt_num(valor, casas=1, idioma="Português"):
-    texto = f"{valor:.{casas}f}"
-    return texto.replace(".", ",") if idioma == "Português" else texto
 
-
-def aplicar_separador_decimal_eixos(ax, idioma="Português"):
-    if idioma == "Português":
-        def formatador_pt(x, pos):
-            if np.isclose(x, round(x)):
-                return f"{int(round(x))}"
-            return f"{x:g}".replace(".", ",")
-
-        ax.xaxis.set_major_formatter(FuncFormatter(formatador_pt))
-        ax.yaxis.set_major_formatter(FuncFormatter(formatador_pt))
-
-
-# ==============================================================================
-# GERENCIAMENTO DE TEMA (CLARO / DARK MODE)
-# ==============================================================================
-def obter_tema_visual(dark_mode=False):
-    if dark_mode:
-        return {
-            "fig_bg": "#0f172a",
-            "ax_bg": "#0f172a",
-            "box_bg": "#1e293b",
-            "text": "#f8fafc",
-            "subtext": "#cbd5e1",
-            "spine": "#64748b",
-            "grid": "#334155",
-            "box_edge": "#475569",
-            "zebra": "#1e293b",
-            "marker_edge": "#0f172a",
-            "ref_line": "#94a3b8",
-        }
-    return {
-        "fig_bg": "#ffffff",
-        "ax_bg": "#ffffff",
-        "box_bg": "#ffffff",
-        "text": "#1e293b",
-        "subtext": "#334155",
-        "spine": "#334155",
-        "grid": "#cbd5e1",
-        "box_edge": "#cbd5e1",
-        "zebra": "#f1f5f9",
-        "marker_edge": "#ffffff",
-        "ref_line": "#94a3b8",
-    }
-
-
-def estilar_figura_e_eixos(fig, ax, tema, idioma="Português", y_color=None):
-    fig.patch.set_facecolor(tema["fig_bg"])
-    ax.set_facecolor(tema["ax_bg"])
-    ax.xaxis.label.set_color(tema["text"])
-    ax.yaxis.label.set_color(y_color if y_color else tema["text"])
-    ax.tick_params(axis="x", colors=tema["subtext"])
-    ax.tick_params(axis="y", colors=y_color if y_color else tema["subtext"])
-    for spine_name, spine in ax.spines.items():
-        if spine_name == "right" and y_color:
-            continue
-        spine.set_color(tema["spine"])
-        spine.set_linewidth(1.4)
-    aplicar_separador_decimal_eixos(ax, idioma)
-
-
-# ==============================================================================
-# LEITURA ROBUSTA E SEGURA DE DADOS
-# ==============================================================================
-def extrair_linhas_arquivo(fonte_dados):
-    if hasattr(fonte_dados, "getvalue"):
-        linhas = [
-            l.decode("utf-8", errors="ignore").rstrip("\r\n")
-            for l in fonte_dados.getvalue().splitlines()
-        ]
-    elif isinstance(fonte_dados, (bytes, bytearray)):
-        linhas = [
-            l.decode("utf-8", errors="ignore").rstrip("\r\n")
-            for l in fonte_dados.splitlines()
-        ]
-    else:
-        with open(fonte_dados, "r", encoding="utf-8", errors="ignore") as f:
-            linhas = [l.rstrip("\r\n") for l in f]
-    return [l for l in linhas if l.strip()]
-
-
-def processar_cabecalho_e_dados(fonte_dados):
-    linhas = extrair_linhas_arquivo(fonte_dados)
-    idx_primeiro_dado = 0
-    idx_long_name, idx_comments = None, None
-
-    for i, linha in enumerate(linhas):
-        partes = linha.split()
-        if not partes:
-            continue
-        if "Long Name" in linha or "LongName" in linha:
-            idx_long_name = i
-        elif "Comments" in linha or "Comment" in linha:
-            idx_comments = i
-
-        conseguiu = False
-        for p in partes:
-            try:
-                float(p.replace(",", "."))
-                conseguiu = True
-                break
-            except ValueError:
-                continue
-
-        if conseguiu and not any(
-            tag in linha
-            for tag in ["Long Name", "Comments", "Units", "Axis", r"\-(", r"\+("]
-        ):
-            idx_primeiro_dado = i
-            break
-
-    idx_rotulos = (
-        idx_long_name
-        if idx_long_name is not None
-        else (idx_comments if idx_comments is not None else 0)
-    )
-
-    linha_cabecalho = linhas[idx_rotulos]
-    tokens = [t.strip() for t in linha_cabecalho.split("\t")]
-    if len(tokens) <= 1:
-        tokens = [t.strip() for t in linha_cabecalho.split()]
-
-    descartes = [
-        "LONG NAME", "LONGNAME", "COMMENTS", "COMMENT", "UNITS", "UNIT", "AXIS", "",
-        "PRESSÃO RELATIVA", "RELATIVE PRESSURE", "QUANTIDADE ADSORVIDA", "QUANTITY ADSORBED"
-    ]
-    tokens_limpos = [
-        t for t in tokens
-        if t.upper() not in descartes
-        and not any(tag in t for tag in [r"\+(", r"\-(", "cm", "g-1", "STP", "p.p"])
-    ]
-
-    max_cols = max(len(l.split("\t")) for l in linhas[idx_primeiro_dado:])
-    if max_cols <= 1:
-        max_cols = max(len(l.split()) for l in linhas[idx_primeiro_dado:])
-
-    matriz = []
-    for l in linhas[idx_primeiro_dado:]:
-        partes_tab = l.split("\t")
-        if len(partes_tab) <= 1 and max_cols > 1:
-            partes_tab = l.split()
-
-        row = []
-        for p in partes_tab:
-            p_limpo = p.strip().replace(",", ".")
-            try:
-                row.append(float(p_limpo))
-            except ValueError:
-                row.append(np.nan)
-
-        while len(row) < max_cols:
-            row.append(np.nan)
-        matriz.append(row[:max_cols])
-
-    df = pd.DataFrame(matriz)
-    return df, tokens_limpos
-
-
-def extrair_ciclos_gcd(fonte_dados, df):
-    linhas = extrair_linhas_arquivo(fonte_dados)
-    linha_taxas = linhas[0].split("\t") if len(linhas) > 0 else []
-    linha_sub = linhas[1].split("\t") if len(linhas) > 1 else []
-
-    tem_subcabecalho = any(
-        palavra in " ".join(linha_sub).upper()
-        for palavra in ["CARGA", "DESCARGA", "CHARGE", "DISCHARGE", "CHG", "DCHG"]
-    )
-
-    ciclos = []
-    num_cols = df.shape[1]
-
-    if tem_subcabecalho and num_cols >= 4:
-        contador_nomes = {}
-        for idx_bloco, col in enumerate(range(0, num_cols, 4)):
-            if col + 3 >= num_cols:
-                break
-
-            sub_chg = df.iloc[:, [col, col + 1]].dropna()
-            sub_dch = df.iloc[:, [col + 2, col + 3]].dropna()
-
-            if len(sub_chg) == 0 and len(sub_dch) == 0:
-                continue
-
-            nome_bruto = (
-                linha_taxas[col].strip()
-                if col < len(linha_taxas) and linha_taxas[col].strip()
-                else f"Curve {idx_bloco + 1}"
-            )
-
-            contador_nomes[nome_bruto] = contador_nomes.get(nome_bruto, 0) + 1
-            chave_unica = (
-                nome_bruto
-                if contador_nomes[nome_bruto] == 1
-                else f"{nome_bruto} ({contador_nomes[nome_bruto]})"
-            )
-
-            ciclos.append({
-                "nome": chave_unica,
-                "label_legenda": nome_bruto,
-                "x_chg": sub_chg.iloc[:, 0].to_numpy(float) if len(sub_chg) > 0 else np.array([]),
-                "y_chg": sub_chg.iloc[:, 1].to_numpy(float) if len(sub_chg) > 0 else np.array([]),
-                "x_dch": sub_dch.iloc[:, 0].to_numpy(float) if len(sub_dch) > 0 else np.array([]),
-                "y_dch": sub_dch.iloc[:, 1].to_numpy(float) if len(sub_dch) > 0 else np.array([]),
-            })
-    else:
-        _, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-        nomes_y = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)] if len(tokens_limpos) >= 2 else tokens_limpos
-        contador_nomes = {}
-        for idx, col in enumerate(range(0, num_cols, 2)):
-            if col + 1 >= num_cols:
-                break
-            sub = df.iloc[:, [col, col + 1]].dropna()
-            if len(sub) == 0:
-                continue
-            nome_bruto = nomes_y[idx].strip() if idx < len(nomes_y) else f"Curve {idx + 1}"
-            contador_nomes[nome_bruto] = contador_nomes.get(nome_bruto, 0) + 1
-            chave_unica = (
-                nome_bruto
-                if contador_nomes[nome_bruto] == 1
-                else f"{nome_bruto} ({contador_nomes[nome_bruto]})"
-            )
-            ciclos.append({
-                "nome": chave_unica,
-                "label_legenda": nome_bruto,
-                "x_chg": sub.iloc[:, 0].to_numpy(float),
-                "y_chg": sub.iloc[:, 1].to_numpy(float),
-                "x_dch": np.array([]),
-                "y_dch": np.array([]),
-            })
-
-    return ciclos
-
-
-def extrair_curvas_3_eletrodos(fonte_dados, df):
-    linhas = extrair_linhas_arquivo(fonte_dados)
-    tokens_cab = [t.strip() for t in linhas[0].split("\t")] if linhas else []
-    if len(tokens_cab) <= 1 and linhas:
-        tokens_cab = [t.strip() for t in linhas[0].split()]
-
-    num_cols = df.shape[1]
-    curvas = []
-    nomes_padrao = ["Ecell/V", "Ewe/V", "Ece/V"]
-
-    for col_idx in range(1, num_cols):
-        sub = df.iloc[:, [0, col_idx]].dropna()
-        if len(sub) == 0:
-            continue
-        nome_col = (
-            tokens_cab[col_idx]
-            if col_idx < len(tokens_cab) and tokens_cab[col_idx]
-            else (nomes_padrao[col_idx - 1] if (col_idx - 1) < len(nomes_padrao) else f"Signal {col_idx}")
-        )
-        curvas.append({
-            "nome": nome_col,
-            "x": sub.iloc[:, 0].to_numpy(float),
-            "y": sub.iloc[:, 1].to_numpy(float),
-        })
-
-    return curvas
-
-
-def identificar_amostras(df, tokens_limpos, tecnica_idx, fonte_dados=None):
-    num_cols = df.shape[1]
-    if tecnica_idx in [3, 8]:
-        num_curvas = num_cols - 1
-        legendas = tokens_limpos[1:] if len(tokens_limpos) > num_curvas else tokens_limpos
-        if len(legendas) < num_curvas:
-            legendas = [f"Sample {i+1}" for i in range(num_curvas)]
-        return legendas[:num_curvas]
-    elif tecnica_idx == 5:
-        return ["Discharge Capacity", "Coulombic Efficiency"]
-    elif tecnica_idx in [2, 6] and fonte_dados is not None:
-        ciclos_gcd = extrair_ciclos_gcd(fonte_dados, df)
-        return [c["nome"] for c in ciclos_gcd]
-    elif tecnica_idx == 7 and fonte_dados is not None:
-        curvas_3e = extrair_curvas_3_eletrodos(fonte_dados, df)
-        return [c["nome"] for c in curvas_3e]
-    else:
-        num_amostras = num_cols // 2 if num_cols >= 2 else num_cols
-        if len(tokens_limpos) >= 2:
-            nomes = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)]
-        else:
-            nomes = tokens_limpos
-        if len(nomes) < num_amostras:
-            nomes = nomes + [f"Sample {i+1}" for i in range(len(nomes), num_amostras)]
-        return nomes[:num_amostras]
-
-
-# ==============================================================================
-# UTILITÁRIOS DE FORMATAÇÃO MANUAL (LIMITES E LEGENDA)
-# ==============================================================================
-def aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema, handles=None, title_legenda=None, fontsize_leg=10.0):
-    if limites_manuais:
-        xlim = limites_manuais.get("xlim")
-        if xlim:
-            if xlim[0] is not None:
-                ax.set_xlim(left=xlim[0])
-            if xlim[1] is not None:
-                ax.set_xlim(right=xlim[1])
-
-        ylim = limites_manuais.get("ylim")
-        if ylim:
-            if ylim[0] is not None:
-                ax.set_ylim(bottom=ylim[0])
-            if ylim[1] is not None:
-                ax.set_ylim(top=ylim[1])
-
-    if posicao_legenda == "Ocultar / Hide":
-        leg = ax.get_legend()
-        if leg:
-            leg.remove()
-    elif posicao_legenda:
-        kwargs_leg = dict(
-            loc=posicao_legenda,
-            frameon=True,
-            facecolor=tema["box_bg"],
-            edgecolor=tema["box_edge"],
-            fontsize=fontsize_leg,
-        )
-        if handles is not None:
-            kwargs_leg["handles"] = handles
-        if title_legenda is not None:
-            kwargs_leg["title"] = title_legenda
-            kwargs_leg["title_fontsize"] = fontsize_leg + 0.5
-
-        leg = ax.legend(**kwargs_leg)
-        for text in leg.get_texts():
-            text.set_color(tema["text"])
-        if leg.get_title():
-            leg.get_title().set_color(tema["text"])
-
-
-# ==============================================================================
-# FUNÇÕES DE PLOTAGEM
-# ==============================================================================
-
-# ------------------------------------------------------------------------------
-# (1) CV MULTIPLOT
-# ------------------------------------------------------------------------------
-def gerar_plot_cv(
-    fonte_dados, velocidade, eixo_x_label, eixo_y_label, tag_carga, tag_descarga,
-    mapa_cores, mapa_nomes, mapa_estilos, limites_manuais, posicao_legenda, tema,
-    idioma="Português", exibir_setas=True, pos_carga=(0.35, 0.58), pos_descarga=(0.65, 0.38)
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    num_cols = df.shape[1]
-    curvas = []
-
-    if num_cols >= 2 and num_cols % 2 == 0:
-        nomes_y = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)] if len(tokens_limpos) >= 2 else tokens_limpos
-        for idx, col in enumerate(range(0, num_cols, 2)):
-            sub = df.iloc[:, [col, col + 1]].dropna()
-            if len(sub) == 0: continue
-            nome = nomes_y[idx] if idx < len(nomes_y) else f"Sample {idx + 1}"
-            curvas.append({"nome": nome.strip(), "E": sub.iloc[:, 0].to_numpy(float), "I": sub.iloc[:, 1].to_numpy(float)})
-    else:
-        nomes_y = tokens_limpos[1:] if len(tokens_limpos) >= num_cols else tokens_limpos
-        for col in range(1, num_cols):
-            sub = df.iloc[:, [0, col]].dropna()
-            if len(sub) == 0: continue
-            nome = nomes_y[col - 1] if (col - 1) < len(nomes_y) else f"Sample {col}"
-            curvas.append({"nome": nome.strip(), "E": sub.iloc[:, 0].to_numpy(float), "I": sub.iloc[:, 1].to_numpy(float)})
-
-    fig, ax = plt.subplots(figsize=(8.4, 5.4), dpi=300)
-    todos_e = np.concatenate([c["E"] for c in curvas if len(c["E"]) > 0])
-    todos_i = np.concatenate([c["I"] for c in curvas if len(c["I"]) > 0])
-    e_min, e_max = np.min(todos_e), np.max(todos_e)
-    i_min, i_max = np.min(todos_i), np.max(todos_i)
-
-    ax.axhline(0, color=tema["ref_line"], linestyle="--", linewidth=1.1, alpha=0.7)
-    for idx, c in enumerate(curvas):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_curva = mapa_nomes.get(c["nome"], c["nome"])
-        ax.plot(c["E"], c["I"], color=cor, linewidth=2.2, linestyle=estilo, label=rotulo_curva)
-
-    span_e, span_i = e_max - e_min, i_max - i_min
-    if exibir_setas:
-        ax.text(
-            pos_carga[0], pos_carga[1], tag_carga,
-            transform=ax.transAxes, fontsize=10.5, fontweight="semibold", color=tema["subtext"], zorder=5
-        )
-        ax.text(
-            pos_descarga[0], pos_descarga[1], tag_descarga,
-            transform=ax.transAxes, fontsize=10.5, fontweight="semibold", color=tema["subtext"], zorder=5
-        )
-
-    if velocidade:
-        ax.text(0.04, 0.93, rf"$\nu = {velocidade}$", transform=ax.transAxes, fontsize=10.5,
-                fontweight="bold", color=tema["text"], bbox=dict(boxstyle="round,pad=0.35", facecolor=tema["box_bg"], edgecolor=tema["box_edge"]))
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(e_min - span_e * 0.05, e_max + span_e * 0.05)
-    ax.set_ylim(i_min - span_i * 0.10, i_max + span_i * 0.18)
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (2) EIE NYQUIST (COM INSET 1:1 PARA ALTAS FREQUÊNCIAS E MODO APENAS LINHA)
-# ------------------------------------------------------------------------------
-def gerar_plot_eie(
-    fonte_dados, circuito_bytes, eixo_x_label, eixo_y_label, titulo_inset,
-    mapa_cores, mapa_nomes, mapa_estilos, limites_manuais, posicao_legenda, tema,
-    idioma="Português", pos_circuito=(0.62, 0.78), zoom_circuito=0.36,
-    exibir_inset=False, inset_bbox=(0.48, 0.18, 0.44, 0.34), inset_limites=None,
-    aspect_equal=False, modo_plot="Pontos + Linha"
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    num_cols = df.shape[1]
-    curvas = []
-
-    nomes_y = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)] if len(tokens_limpos) >= 2 else tokens_limpos
-    for idx, col in enumerate(range(0, num_cols, 2)):
-        if col + 1 < num_cols:
-            nome = nomes_y[idx] if idx < len(nomes_y) else f"Sample {idx + 1}"
-            if nome.strip().upper() in ["Y", "ZIM", "-ZIM", ""]:
-                nome = f"Sample {idx + 1}"
-            sub = df.iloc[:, [col, col + 1]].dropna()
-            if len(sub) == 0: continue
-            curvas.append({"nome": nome.strip(), "re": sub.iloc[:, 0].to_numpy(float), "im": sub.iloc[:, 1].to_numpy(float)})
-
-    fig, ax = plt.subplots(figsize=(8.4, 5.4), dpi=300)
-    marcadores_ciclo = cycle(MARCADORES_PADRAO)
-
-    todos_re = np.concatenate([c["re"] for c in curvas if len(c["re"]) > 0])
-    todos_im = np.concatenate([c["im"] for c in curvas if len(c["im"]) > 0])
-    re_min, re_max = np.min(todos_re), np.max(todos_re)
-    im_min, im_max = np.min(todos_im), np.max(todos_im)
-
-    marcadores_por_curva = []
-    for idx, c in enumerate(curvas):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_curva = mapa_nomes.get(c["nome"], c["nome"])
-        marcador = next(marcadores_ciclo)
-        marcadores_por_curva.append(marcador)
-
-        if modo_plot == "Apenas Linha":
-            ax.plot(c["re"], c["im"], color=cor, linewidth=2.2, linestyle=estilo, alpha=0.95, label=rotulo_curva, zorder=4)
-        else:
-            ax.plot(c["re"], c["im"], color=cor, linewidth=1.7, linestyle=estilo, alpha=0.65, zorder=3)
-            ax.scatter(c["re"], c["im"], color=cor, s=40, marker=marcador, edgecolors=tema["marker_edge"], linewidths=0.75, label=rotulo_curva, zorder=4)
-
-    # Inset para região de altas frequências com proporção 1:1 por padrão
-    if exibir_inset and curvas:
-        ax_ins = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=inset_bbox, bbox_transform=ax.transAxes)
-        ax_ins.set_facecolor(tema["ax_bg"])
-
-        for idx, c in enumerate(curvas):
-            cor_ins = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-            estilo_ins = mapa_estilos.get(c["nome"], "-")
-            marcador_ins = marcadores_por_curva[idx]
-
-            if modo_plot == "Apenas Linha":
-                ax_ins.plot(c["re"], c["im"], color=cor_ins, linewidth=1.9, linestyle=estilo_ins, alpha=0.95, zorder=4)
-            else:
-                ax_ins.plot(c["re"], c["im"], color=cor_ins, linewidth=1.4, linestyle=estilo_ins, alpha=0.75, zorder=3)
-                ax_ins.scatter(c["re"], c["im"], color=cor_ins, s=24, marker=marcador_ins, edgecolors=tema["marker_edge"], linewidths=0.5, zorder=4)
-
-        span_re_def = re_max - re_min
-        ax_ins.set_xlim(min(0, re_min - 0.5), re_min + max(span_re_def * 0.25, 5.0))
-        ax_ins.set_ylim(min(-0.5, im_min - 0.5), re_min + max(span_re_def * 0.25, 5.0))
-
-        if inset_limites:
-            if inset_limites.get("xmin") is not None: ax_ins.set_xlim(left=inset_limites["xmin"])
-            if inset_limites.get("xmax") is not None: ax_ins.set_xlim(right=inset_limites["xmax"])
-            if inset_limites.get("ymin") is not None: ax_ins.set_ylim(bottom=inset_limites["ymin"])
-            if inset_limites.get("ymax") is not None: ax_ins.set_ylim(top=inset_limites["ymax"])
-
-        # Proporção 1:1 garantida no Inset para preservar o semicírculo real
-        ax_ins.set_aspect("equal", adjustable="box")
-        ax_ins.tick_params(labelsize=8.0, colors=tema["subtext"])
-        aplicar_separador_decimal_eixos(ax_ins, idioma)
-        for sp in ax_ins.spines.values():
-            sp.set_color(tema["spine"])
-        ax_ins.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-        ax_ins.set_title(titulo_inset, fontsize=8.5, fontweight="bold", color=tema["subtext"], pad=3)
-
-    if circuito_bytes is not None:
-        img = mpimg.imread(circuito_bytes)
-        ab = AnnotationBbox(
-            OffsetImage(img, zoom=zoom_circuito),
-            pos_circuito,
-            xycoords="axes fraction",
-            frameon=True, pad=0.35, bboxprops=dict(edgecolor=tema["box_edge"], facecolor="#ffffff", alpha=0.95, lw=1.0),
-            zorder=8
-        )
-        ax.add_artist(ab)
-
-    span_re = re_max - re_min
-    span_im = im_max - im_min
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(min(0, re_min - span_re * 0.04), re_max + span_re * 0.12)
-    ax.set_ylim(min(0, im_min - span_im * 0.03), im_max * 1.15)
-    if aspect_equal:
-        ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (3) CARGA/DESCARGA GALVANOSTÁTICA - GCD (BATERIA)
-# ------------------------------------------------------------------------------
-def gerar_plot_gcd(
-    fonte_dados,
-    eixo_x_label,
-    eixo_y_label,
-    mapa_cores,
-    mapa_nomes,
-    mapa_estilos,
-    limites_manuais,
-    posicao_legenda,
-    tema,
-    idioma="Português",
-    exibir_delta_e=True,
-    delta_e_texto=r"$\Delta E$",
-    delta_e_x_frac=0.40,
-    delta_e_y_topo=0.58,
-    delta_e_y_base=0.46,
-    delta_e_lado_texto="Direita / Right"
-):
-    df, _ = processar_cabecalho_e_dados(fonte_dados)
-    ciclos = extrair_ciclos_gcd(fonte_dados, df)
-
-    if not ciclos:
-        raise ValueError("Nenhuma curva válida encontrada no arquivo de Carga/Descarga.")
-
-    fig, ax = plt.subplots(figsize=(8.6, 5.4), dpi=300)
-
-    todos_x, todos_y = [], []
-    for idx, c in enumerate(ciclos):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_legenda = mapa_nomes.get(c["nome"], c["label_legenda"])
-
-        if len(c["x_chg"]) > 0:
-            ax.plot(c["x_chg"], c["y_chg"], color=cor, linewidth=2.1, linestyle=estilo, label=rotulo_legenda, zorder=4)
-            todos_x.append(c["x_chg"])
-            todos_y.append(c["y_chg"])
-
-        if len(c["x_dch"]) > 0:
-            lbl_dch = "_nolegend_" if len(c["x_chg"]) > 0 else rotulo_legenda
-            ax.plot(c["x_dch"], c["y_dch"], color=cor, linewidth=2.1, linestyle=estilo, label=lbl_dch, zorder=4)
-            todos_x.append(c["x_dch"])
-            todos_y.append(c["y_dch"])
-
-    x_concat = np.concatenate(todos_x)
-    y_concat = np.concatenate(todos_y)
-    x_min, x_max = np.min(x_concat), np.max(x_concat)
-    y_min, y_max = np.min(y_concat), np.max(y_concat)
-    span_x = x_max - x_min
-    span_y = y_max - y_min
-
-    if exibir_delta_e:
-        y_topo_ajustado = max(delta_e_y_topo, delta_e_y_base + 0.02)
-        ax.annotate(
-            "",
-            xy=(delta_e_x_frac, y_topo_ajustado),
-            xytext=(delta_e_x_frac, delta_e_y_base),
-            xycoords="axes fraction",
-            textcoords="axes fraction",
-            arrowprops=dict(
-                arrowstyle="<->",
-                color=tema["text"],
-                lw=1.5,
-                shrinkA=0,
-                shrinkB=0
-            ),
-            zorder=7
-        )
-        if delta_e_texto:
-            offset_x = 0.018 if "Direita" in delta_e_lado_texto else -0.018
-            alinhamento_h = "left" if "Direita" in delta_e_lado_texto else "right"
-            y_meio = (y_topo_ajustado + delta_e_y_base) / 2.0
-            ax.text(
-                delta_e_x_frac + offset_x,
-                y_meio,
-                delta_e_texto,
-                transform=ax.transAxes,
-                fontsize=11.0,
-                fontweight="bold",
-                color=tema["text"],
-                va="center",
-                ha=alinhamento_h,
-                zorder=8
-            )
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(min(0, x_min - span_x * 0.03), x_max + span_x * 0.16)
-    ax.set_ylim(y_min - span_y * 0.08, y_max + span_y * 0.08)
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (4) RATE CAPABILITY (BATERIA)
-# ------------------------------------------------------------------------------
-def gerar_plot_rate(
-    fonte_dados, eixo_x_label, eixo_y_label,
-    mapa_cores, mapa_nomes, mapa_estilos, limites_manuais, posicao_legenda, tema,
-    idioma="Português"
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    x_ciclos = df.iloc[:, 0].to_numpy(float)
-    num_curvas = df.shape[1] - 1
-
-    legendas = tokens_limpos[1:] if len(tokens_limpos) > num_curvas else tokens_limpos
-    if len(legendas) < num_curvas:
-        legendas = [f"Sample {i+1}" for i in range(num_curvas)]
-
-    sep = "," if idioma == "Português" else "."
-    zonas_c_rate = [
-        {"label": f"0{sep}1 C", "start": 0.5, "end": 5.5, "mid": 3.0},
-        {"label": f"0{sep}2 C", "start": 5.5, "end": 9.5, "mid": 7.5},
-        {"label": f"0{sep}5 C", "start": 9.5, "end": 13.5, "mid": 11.5},
-        {"label": "1 C", "start": 13.5, "end": 17.5, "mid": 15.5},
-        {"label": "2 C", "start": 17.5, "end": 21.5, "mid": 19.5},
-        {"label": f"0{sep}1 C", "start": 21.5, "end": 25.5, "mid": 23.5},
-    ]
-
-    fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=300)
-    marcadores_ciclo = cycle(MARCADORES_PADRAO)
-
-    y_max = np.nanmax(df.iloc[:, 1:].values)
-    y_min = np.nanmin(df.iloc[:, 1:].values)
-    y_topo = y_max * 1.18
-
-    trans_topo_eixo = ax.get_xaxis_transform()
-
-    for i, zone in enumerate(zonas_c_rate):
-        if i % 2 == 1:
-            ax.axvspan(zone["start"], zone["end"], color=tema["zebra"], alpha=0.9, zorder=1)
-        if i > 0:
-            ax.axvline(zone["start"], color=tema["grid"], linestyle="--", linewidth=1.1, zorder=2)
-
-        ax.text(
-            zone["mid"], 0.94, zone["label"],
-            transform=trans_topo_eixo,
-            ha="center", va="center",
-            fontsize=10.0, fontweight="bold", color=tema["text"],
-            bbox=dict(boxstyle="round,pad=0.25", facecolor=tema["box_bg"], edgecolor=tema["box_edge"], lw=1.0),
-            zorder=5
-        )
-
-    offsets = np.linspace(-0.12, 0.12, num_curvas) if num_curvas > 1 else [0.0]
-    for col_idx in range(num_curvas):
-        y_valores = df.iloc[:, col_idx + 1].to_numpy(float)
-        nome = legendas[col_idx]
-        cor = mapa_cores.get(nome, list(mapa_cores.values())[col_idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(nome, "-")
-        rotulo_curva = mapa_nomes.get(nome, nome)
-        if estilo == "--":
-            ax.plot(x_ciclos + offsets[col_idx], y_valores, color=cor, linewidth=1.2, linestyle="--", alpha=0.5, zorder=3)
-        ax.scatter(
-            x_ciclos + offsets[col_idx], y_valores, color=cor, s=52,
-            marker=next(marcadores_ciclo), edgecolors=tema["marker_edge"], linewidths=0.85,
-            label=rotulo_curva, zorder=4
-        )
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(0, max(x_ciclos) + 1)
-    ax.set_ylim(min(-10, y_min - 20), y_topo * 1.05)
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (5) CICLABILIDADE MULTIPLOT (BATERIA)
-# ------------------------------------------------------------------------------
-def gerar_plot_ciclabilidade(
-    fonte_dados, rate_tag, pos_rate, eixo_x_label, eixo_y_label,
-    mapa_cores, mapa_nomes, mapa_estilos, limites_manuais, posicao_legenda,
-    tema, idioma="Português", unidade_y=r"mAh\ g^{-1}"
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    num_cols = df.shape[1]
-    curvas = []
-
-    if num_cols >= 2 and num_cols % 2 == 0:
-        nomes_y = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)] if len(tokens_limpos) >= 2 else tokens_limpos
-        for idx, col in enumerate(range(0, num_cols, 2)):
-            sub = df.iloc[:, [col, col + 1]].dropna()
-            if len(sub) == 0: continue
-            nome = nomes_y[idx] if idx < len(nomes_y) else f"Sample {idx + 1}"
-            curvas.append({"nome": nome, "x": sub.iloc[:, 0].to_numpy(float), "y": sub.iloc[:, 1].to_numpy(float)})
-    else:
-        nomes_y = tokens_limpos[1:] if len(tokens_limpos) >= num_cols else tokens_limpos
-        for col in range(1, num_cols):
-            sub = df.iloc[:, [0, col]].dropna()
-            if len(sub) == 0: continue
-            nome = nomes_y[col - 1] if (col - 1) < len(nomes_y) else f"Sample {col}"
-            curvas.append({"nome": nome, "x": sub.iloc[:, 0].to_numpy(float), "y": sub.iloc[:, 1].to_numpy(float)})
-
-    fig, ax = plt.subplots(figsize=(9.2, 5.2), dpi=300)
-    todos_x = np.concatenate([c["x"] for c in curvas if len(c["x"]) > 0])
-    todos_y = np.concatenate([c["y"] for c in curvas if len(c["y"]) > 0])
-    x_min_dados, x_max_dados = np.min(todos_x), np.max(todos_x)
-    y_min_dados, y_max_dados = np.min(todos_y), np.max(todos_y)
-
-    xlim_user = limites_manuais.get("xlim") if limites_manuais else (None, None)
-    x_limite_corte = xlim_user[1] if (xlim_user and xlim_user[1] is not None) else x_max_dados
-    x_inicio_corte = xlim_user[0] if (xlim_user and xlim_user[0] is not None) else x_min_dados
-
-    dados_finais = []
-    for idx, c in enumerate(curvas):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_curva = mapa_nomes.get(c["nome"], c["nome"])
-        ax.plot(c["x"], c["y"], color=cor, lw=2.0, linestyle=estilo, label=rotulo_curva, zorder=4)
-
-        mascara = (c["x"] >= x_inicio_corte) & (c["x"] <= x_limite_corte)
-        if np.any(mascara):
-            x_vis = c["x"][mascara]
-            y_vis = c["y"][mascara]
-        else:
-            x_vis = c["x"]
-            y_vis = c["y"]
-
-        c0, cf = y_vis[0], y_vis[-1]
-        x_end_vis = x_vis[-1]
-        ret = (cf / c0) * 100 if c0 != 0 else 0.0
-
-        dados_finais.append({"nome": rotulo_curva, "x_end": x_end_vis, "y_end": cf, "ret": ret, "cor": cor})
-        ax.scatter(x_end_vis, cf, color=cor, s=30, zorder=6, edgecolors=tema["marker_edge"], linewidths=0.8)
-
-    dados_finais.sort(key=lambda item: item["y_end"], reverse=True)
-    num_amostras = len(dados_finais)
-    x_ancora_direita = max(d["x_end"] for d in dados_finais)
-
-    span_x = x_ancora_direita - x_inicio_corte
-    span_y = y_max_dados - (y_min_dados if y_min_dados < 0 else 0)
-    ylim_user = limites_manuais.get("ylim") if limites_manuais else (None, None)
-    topo_y_ref = ylim_user[1] if (ylim_user and ylim_user[1] is not None) else y_max_dados
-
-    y_posicoes = np.linspace(topo_y_ref * 0.34, topo_y_ref * 0.07, num_amostras) if num_amostras > 1 else [topo_y_ref * 0.34]
-
-    for i, d in enumerate(dados_finais):
-        ret_str = fmt_num(d["ret"], casas=1, idioma=idioma)
-        ax.annotate(
-            rf"$\mathbf{{{d['y_end']:.0f}\ {unidade_y}}}$  ({ret_str}%)",
-            xy=(d["x_end"], d["y_end"]),
-            xytext=(x_ancora_direita + span_x * 0.045, y_posicoes[i]),
-            fontsize=8.5, fontweight="semibold", color=tema["text"], va="center",
-            bbox=dict(boxstyle="round,pad=0.36", facecolor=tema["box_bg"], edgecolor=d["cor"], linewidth=1.3, alpha=0.98),
-            arrowprops=dict(arrowstyle="->", color=d["cor"], lw=1.0, connectionstyle="arc3,rad=-0.08"),
-            zorder=7,
-        )
-
-    ax.axvline(x_ancora_direita, color=tema["ref_line"], linestyle=":", linewidth=1.1, alpha=0.8, zorder=2)
-    if rate_tag:
-        ax.text(
-            pos_rate[0], pos_rate[1], rf"$\mathbf{{{rate_tag}}}$",
-            transform=ax.transAxes, fontsize=10.5, fontweight="bold", color=tema["subtext"],
-            bbox=dict(boxstyle="round,pad=0.4", facecolor=tema["box_bg"], edgecolor=tema["box_edge"], linewidth=1.1, alpha=0.95),
-            zorder=6
-        )
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(x_inicio_corte - span_x * 0.02, x_ancora_direita + span_x * 0.32)
-    ax.set_ylim(min(-span_y * 0.02, y_min_dados), y_max_dados * 1.15)
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    limites_aplicar = {
-        "xlim": (
-            xlim_user[0],
-            (xlim_user[1] + span_x * 0.32) if (xlim_user and xlim_user[1] is not None) else None
-        ),
-        "ylim": ylim_user,
-    }
-    aplicar_ajustes_eixos_e_legenda(ax, limites_aplicar, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (6) CICLABILIDADE & EFICIÊNCIA COULÔMBICA INDIVIDUAL (BATERIA)
-# ------------------------------------------------------------------------------
-def gerar_plot_ciclabilidade_eficiencia(
-    fonte_dados,
-    eixo_x_label,
-    eixo_y1_label,
-    eixo_y2_label,
-    nome_amostra="CHZn700@S60",
-    rate_tag="0,5 C",
-    pos_rate=(0.04, 0.78),
-    cor_capacidade="#0f172a",
-    cor_eficiencia="#2563eb",
-    estilo_capacidade="--",
-    estilo_eficiencia="-",
-    modo_cap="Pontos + Linha",
-    modo_eff="Pontos + Linha",
-    limites_manuais=None,
-    patamar_ref=None,
-    tema=None,
-    idioma="Português",
-    unidade_y=r"mAh\ g_S^{-1}"
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    num_cols = df.shape[1]
-
-    if num_cols >= 4:
-        sub = df.iloc[:, [0, 2, 3]].dropna()
-        x_ciclos = sub.iloc[:, 0].to_numpy(float)
-        y_cap = sub.iloc[:, 1].to_numpy(float)
-        y_eff = sub.iloc[:, 2].to_numpy(float)
-    elif num_cols == 3:
-        sub = df.dropna()
-        x_ciclos = sub.iloc[:, 0].to_numpy(float)
-        y_cap = sub.iloc[:, 1].to_numpy(float)
-        y_eff = sub.iloc[:, 2].to_numpy(float)
-    else:
-        raise ValueError("O arquivo para Ciclabilidade + Eficiência precisa conter ao menos 3 colunas (Ciclo, Capacidade e Eficiência).")
-
-    fig, ax1 = plt.subplots(figsize=(8.8, 5.4), dpi=300)
-
-    if modo_cap == "Apenas Linha":
-        ax1.plot(x_ciclos, y_cap, color=cor_capacidade, linewidth=2.2, linestyle=estilo_capacidade, alpha=0.95, zorder=4)
-    else:
-        ax1.plot(x_ciclos, y_cap, color=cor_capacidade, linewidth=1.3, linestyle=estilo_capacidade, alpha=0.5, zorder=3)
-        ax1.scatter(x_ciclos, y_cap, color=cor_capacidade, s=18, marker="s", linewidths=0.0, zorder=4)
-
-    if patamar_ref is not None and patamar_ref > 0:
-        ax1.axhline(patamar_ref, color=tema["ref_line"], linestyle=":", linewidth=1.2, alpha=0.85, zorder=2)
-
-    x_min_dados, x_max_dados = np.min(x_ciclos), np.max(x_ciclos)
-    y1_max_dados = np.max(y_cap)
-
-    xlim_user = limites_manuais.get("xlim") if limites_manuais else (None, None)
-    x_inicio_corte = xlim_user[0] if (xlim_user and xlim_user[0] is not None) else x_min_dados
-    x_limite_corte = xlim_user[1] if (xlim_user and xlim_user[1] is not None) else x_max_dados
-
-    mascara = (x_ciclos >= x_inicio_corte) & (x_ciclos <= x_limite_corte)
-    if np.any(mascara):
-        x_vis = x_ciclos[mascara]
-        y_vis = y_cap[mascara]
-    else:
-        x_vis = x_ciclos
-        y_vis = y_cap
-
-    c0 = y_vis[0]
-    cf = y_vis[-1]
-    x_end_vis = x_vis[-1]
-    ret = (cf / c0) * 100 if c0 != 0 else 0.0
-
-    ax1.axvline(x_end_vis, color=tema["ref_line"], linestyle=":", linewidth=1.1, alpha=0.7, zorder=2)
-    ax1.annotate("←", xy=(0.04, 0.55), xycoords="axes fraction", fontsize=14, fontweight="bold", color=cor_capacidade)
-
-    ret_str = fmt_num(ret, casas=1, idioma=idioma)
-    texto_retencao = rf"$\mathbf{{{cf:.0f}\ {unidade_y}}}$  ({ret_str}%)"
-    ax1.annotate(
-        texto_retencao,
-        xy=(x_end_vis, cf),
-        xytext=(0.42, 0.40),
-        textcoords="axes fraction",
-        fontsize=9.5,
-        fontweight="semibold",
-        color=tema["text"],
-        bbox=dict(boxstyle="round,pad=0.38", facecolor=tema["box_bg"], edgecolor=cor_capacidade, linewidth=1.2, alpha=0.98),
-        arrowprops=dict(arrowstyle="->", color=cor_capacidade, lw=1.0, connectionstyle="arc3,rad=-0.1"),
-        zorder=7
-    )
-
-    if rate_tag:
-        ax1.text(
-            pos_rate[0], pos_rate[1],
-            rf"$\mathbf{{{rate_tag}}}$",
-            transform=ax1.transAxes,
-            fontsize=10.5,
-            fontweight="bold",
-            color=tema["subtext"],
-            bbox=dict(boxstyle="round,pad=0.35", facecolor=tema["box_bg"], edgecolor=tema["box_edge"], linewidth=1.1, alpha=0.95),
-            zorder=6
-        )
-
-    ax1.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax1.set_ylabel(eixo_y1_label, fontsize=12.5, labelpad=8, color=cor_capacidade)
-    ax1.tick_params(axis="y", labelcolor=cor_capacidade, color=cor_capacidade, width=1.4)
-    ax1.tick_params(axis="x", width=1.4)
-    ax1.set_xlim(0, x_max_dados + max(2, x_max_dados * 0.02))
-    ax1.set_ylim(0, y1_max_dados * 1.35)
-
-    aplicar_ajustes_eixos_e_legenda(ax1, limites_manuais, posicao_legenda=None, tema=tema)
-    estilar_figura_e_eixos(fig, ax1, tema, idioma, y_color=cor_capacidade)
-
-    if nome_amostra:
-        ax1.text(0.05, 0.08, nome_amostra, transform=ax1.transAxes, fontsize=13, fontweight="bold", color=tema["text"])
-
-    ax2 = ax1.twinx()
-    if modo_eff == "Apenas Linha":
-        ax2.plot(x_ciclos, y_eff, color=cor_eficiencia, linewidth=2.2, linestyle=estilo_eficiencia, alpha=0.95, zorder=6)
-    else:
-        ax2.plot(x_ciclos, y_eff, color=cor_eficiencia, linewidth=1.2, linestyle=estilo_eficiencia, alpha=0.45, zorder=5)
-        ax2.scatter(x_ciclos, y_eff, color=cor_eficiencia, s=16, marker="o", linewidths=0.0, zorder=6)
-
-    ax2.annotate("→", xy=(0.92, 0.82), xycoords="axes fraction", fontsize=14, fontweight="bold", color=cor_eficiencia)
-
-    ax2.set_ylabel(eixo_y2_label, fontsize=12.5, labelpad=8, color=cor_eficiencia)
-    ax2.tick_params(axis="y", labelcolor=cor_eficiencia, width=1.4, color=cor_eficiencia)
-    ax2.spines["right"].set_color(cor_eficiencia)
-    ax2.spines["right"].set_linewidth(1.4)
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["bottom"].set_visible(False)
-    ax2.spines["left"].set_visible(False)
-
-    y2lim_user = limites_manuais.get("y2lim") if limites_manuais else (None, None)
-    y2_min_val = y2lim_user[0] if (y2lim_user and y2lim_user[0] is not None) else 0.0
-    y2_max_val = y2lim_user[1] if (y2lim_user and y2lim_user[1] is not None) else 110.0
-    ax2.set_ylim(y2_min_val, y2_max_val)
-    aplicar_separador_decimal_eixos(ax2, idioma)
-
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (7) CGCD SUPERCAPACITOR (2 ELETRODOS / JANELAS DE POTENCIAL)
-# ------------------------------------------------------------------------------
-def gerar_plot_sc_2e_cgcd(
-    fonte_dados,
-    eixo_x_label,
-    eixo_y_label,
-    mapa_cores,
-    mapa_nomes,
-    mapa_estilos,
-    limites_manuais,
-    posicao_legenda,
-    tema,
-    idioma="Português",
-    exibir_ir_drop=False,
-    ir_texto=r"$IR_{drop}$",
-    ir_x_frac=0.25,
-    ir_y_topo=0.88,
-    ir_y_base=0.78,
-):
-    df, _ = processar_cabecalho_e_dados(fonte_dados)
-    ciclos = extrair_ciclos_gcd(fonte_dados, df)
-
-    if not ciclos:
-        raise ValueError("Nenhuma curva válida encontrada no arquivo CGCD (2 Eletrodos).")
-
-    fig, ax = plt.subplots(figsize=(8.6, 5.4), dpi=300)
-
-    todos_x, todos_y = [], []
-    for idx, c in enumerate(ciclos):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_legenda = mapa_nomes.get(c["nome"], c["label_legenda"])
-
-        if len(c["x_chg"]) > 0:
-            ax.plot(c["x_chg"], c["y_chg"], color=cor, linewidth=2.1, linestyle=estilo, label=rotulo_legenda, zorder=4)
-            todos_x.append(c["x_chg"])
-            todos_y.append(c["y_chg"])
-
-        if len(c["x_dch"]) > 0:
-            lbl_dch = "_nolegend_" if len(c["x_chg"]) > 0 else rotulo_legenda
-            ax.plot(c["x_dch"], c["y_dch"], color=cor, linewidth=2.1, linestyle=estilo, label=lbl_dch, zorder=4)
-            todos_x.append(c["x_dch"])
-            todos_y.append(c["y_dch"])
-
-    x_concat = np.concatenate(todos_x)
-    y_concat = np.concatenate(todos_y)
-    x_min, x_max = np.min(x_concat), np.max(x_concat)
-    y_min, y_max = np.min(y_concat), np.max(y_concat)
-    span_x = x_max - x_min
-    span_y = y_max - y_min
-
-    if exibir_ir_drop:
-        y_topo_aj = max(ir_y_topo, ir_y_base + 0.02)
-        ax.annotate(
-            "",
-            xy=(ir_x_frac, y_topo_aj),
-            xytext=(ir_x_frac, ir_y_base),
-            xycoords="axes fraction",
-            textcoords="axes fraction",
-            arrowprops=dict(arrowstyle="<->", color=tema["text"], lw=1.4, shrinkA=0, shrinkB=0),
-            zorder=7
-        )
-        if ir_texto:
-            ax.text(
-                ir_x_frac + 0.018,
-                (y_topo_aj + ir_y_base) / 2.0,
-                ir_texto,
-                transform=ax.transAxes,
-                fontsize=10.5,
-                fontweight="bold",
-                color=tema["text"],
-                va="center",
-                ha="left",
-                zorder=8
-            )
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(min(0, x_min - span_x * 0.02), x_max + span_x * 0.14)
-    ax.set_ylim(y_min - span_y * 0.06, y_max + span_y * 0.10)
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (8) CGCD SUPERCAPACITOR (3 ELETRODOS: Ecell no Y1, Ewe & Ece no Y2)
-# ------------------------------------------------------------------------------
-def gerar_plot_sc_3e_cgcd(
-    fonte_dados,
-    eixo_x_label,
-    eixo_y1_label,
-    eixo_y2_label,
-    mapa_cores,
-    mapa_nomes,
-    mapa_estilos,
-    limites_manuais,
-    posicao_legenda,
-    tema,
-    idioma="Português",
-    exibir_linha_zero=True,
-    nome_amostra_3e="Amostra / Sample",
-    pos_amostra_3e=(0.05, 0.90)
-):
-    df, _ = processar_cabecalho_e_dados(fonte_dados)
-    curvas = extrair_curvas_3_eletrodos(fonte_dados, df)
-
-    if not curvas:
-        raise ValueError("Nenhuma curva válida encontrada no arquivo de 3 Eletrodos (time/s | Ecell/V | Ewe/V | Ece/V).")
-
-    fig, ax1 = plt.subplots(figsize=(8.8, 5.4), dpi=300)
-    ax2 = ax1.twinx()
-
-    if exibir_linha_zero:
-        ax2.axhline(0, color=tema["ref_line"], linestyle="--", linewidth=1.1, alpha=0.75, zorder=2)
-
-    handles_unificados = []
-    todos_x, todos_y1, todos_y2 = [], [], []
-
-    for idx, c in enumerate(curvas):
-        cor = mapa_cores.get(c["nome"], list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(c["nome"], "-")
-        rotulo_legenda = mapa_nomes.get(c["nome"], c["nome"])
-
-        todos_x.append(c["x"])
-
-        if idx == 0:
-            linha, = ax1.plot(c["x"], c["y"], color=cor, linewidth=2.2, linestyle=estilo, label=rotulo_legenda, zorder=5)
-            todos_y1.append(c["y"])
-        else:
-            linha, = ax2.plot(c["x"], c["y"], color=cor, linewidth=2.2, linestyle=estilo, label=rotulo_legenda, zorder=4)
-            todos_y2.append(c["y"])
-
-        handles_unificados.append(linha)
-
-    x_concat = np.concatenate(todos_x)
-    x_min, x_max = np.min(x_concat), np.max(x_concat)
-    span_x = x_max - x_min
-
-    if todos_y1:
-        y1_concat = np.concatenate(todos_y1)
-        y1_min, y1_max = np.min(y1_concat), np.max(y1_concat)
-        span_y1 = max(y1_max - y1_min, 0.1)
-        ax1.set_ylim(min(0, y1_min - span_y1 * 0.08), y1_max + span_y1 * 0.14)
-
-    if todos_y2:
-        y2_concat = np.concatenate(todos_y2)
-        y2_min, y2_max = np.min(y2_concat), np.max(y2_concat)
-        span_y2 = max(y2_max - y2_min, 0.1)
-        ax2.set_ylim(y2_min - span_y2 * 0.12, y2_max + span_y2 * 0.15)
-
-    ax1.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax1.set_ylabel(eixo_y1_label, fontsize=12.5, labelpad=8)
-    ax1.set_xlim(min(0, x_min - span_x * 0.02), x_max + span_x * 0.05)
-    ax1.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax1, limites_manuais, posicao_legenda=None, tema=tema)
-    estilar_figura_e_eixos(fig, ax1, tema, idioma)
-
-    ax2.set_ylabel(eixo_y2_label, fontsize=12.5, labelpad=8, color=tema["text"])
-    ax2.tick_params(axis="y", labelcolor=tema["subtext"], width=1.4, color=tema["spine"])
-    ax2.spines["right"].set_color(tema["spine"])
-    ax2.spines["right"].set_linewidth(1.4)
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["bottom"].set_visible(False)
-    ax2.spines["left"].set_visible(False)
-
-    y2lim_user = limites_manuais.get("y2lim") if limites_manuais else (None, None)
-    if y2lim_user:
-        if y2lim_user[0] is not None:
-            ax2.set_ylim(bottom=y2lim_user[0])
-        if y2lim_user[1] is not None:
-            ax2.set_ylim(top=y2lim_user[1])
-    aplicar_separador_decimal_eixos(ax2, idioma)
-
-    if nome_amostra_3e and nome_amostra_3e.strip():
-        ax2.text(
-            pos_amostra_3e[0], pos_amostra_3e[1],
-            rf"$\mathbf{{{nome_amostra_3e.strip()}}}$",
-            transform=ax2.transAxes,
-            fontsize=10.5,
-            fontweight="bold",
-            color=tema["text"],
-            bbox=dict(
-                boxstyle="round,pad=0.38",
-                facecolor=tema["box_bg"],
-                edgecolor=tema["box_edge"],
-                linewidth=1.1,
-                alpha=0.95
-            ),
-            zorder=8
-        )
-
-    if posicao_legenda and posicao_legenda != "Ocultar / Hide":
-        leg = ax2.legend(
-            handles=handles_unificados,
-            loc=posicao_legenda,
-            frameon=True,
-            facecolor=tema["box_bg"],
-            edgecolor=tema["box_edge"],
-            fontsize=10.0,
-        )
-        for text in leg.get_texts():
-            text.set_color(tema["text"])
-
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (9) RATE CAPABILITY (SUPERCAPACITOR)
-# ------------------------------------------------------------------------------
-def gerar_plot_sc_rate(
-    fonte_dados, eixo_x_label, eixo_y_label,
-    mapa_cores, mapa_nomes, mapa_estilos, limites_manuais, posicao_legenda, tema,
-    idioma="Português", protocolo_correntes="0.5, 1, 2, 5, 10, 0.5", ciclos_por_degrau=5
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    x_ciclos = df.iloc[:, 0].to_numpy(float)
-    num_curvas = df.shape[1] - 1
-
-    legendas = tokens_limpos[1:] if len(tokens_limpos) > num_curvas else tokens_limpos
-    if len(legendas) < num_curvas:
-        legendas = [f"Sample {i+1}" for i in range(num_curvas)]
-
-    lista_taxas = [t.strip() for t in protocolo_correntes.split(",") if t.strip()]
-    if not lista_taxas:
-        lista_taxas = ["0.5", "1", "2", "5", "10", "0.5"]
-
-    zonas_corrente = []
-    for i, taxa in enumerate(lista_taxas):
-        taxa_fmt = taxa.replace(".", ",") if idioma == "Português" else taxa.replace(",", ".")
-        inicio = i * ciclos_por_degrau + 0.5
-        fim = (i + 1) * ciclos_por_degrau + 0.5
-        meio = (inicio + fim) / 2.0
-        zonas_corrente.append({
-            "label": rf"{taxa_fmt} $\mathrm{{A\ g^{{-1}}}}$",
-            "start": inicio,
-            "end": fim,
-            "mid": meio
-        })
-
-    fig, ax = plt.subplots(figsize=(8.8, 5.2), dpi=300)
-    marcadores_ciclo = cycle(MARCADORES_PADRAO)
-
-    y_max = np.nanmax(df.iloc[:, 1:].values)
-    y_min = np.nanmin(df.iloc[:, 1:].values)
-    y_topo = y_max * 1.18
-
-    trans_topo_eixo = ax.get_xaxis_transform()
-
-    for i, zone in enumerate(zonas_corrente):
-        if i % 2 == 1:
-            ax.axvspan(zone["start"], zone["end"], color=tema["zebra"], alpha=0.9, zorder=1)
-        if i > 0:
-            ax.axvline(zone["start"], color=tema["grid"], linestyle="--", linewidth=1.1, zorder=2)
-
-        ax.text(
-            zone["mid"], 0.94, zone["label"],
-            transform=trans_topo_eixo,
-            ha="center", va="center",
-            fontsize=9.2, fontweight="bold", color=tema["text"],
-            bbox=dict(boxstyle="round,pad=0.25", facecolor=tema["box_bg"], edgecolor=tema["box_edge"], lw=1.0),
-            zorder=5
-        )
-
-    offsets = np.linspace(-0.12, 0.12, num_curvas) if num_curvas > 1 else [0.0]
-    for col_idx in range(num_curvas):
-        y_valores = df.iloc[:, col_idx + 1].to_numpy(float)
-        nome = legendas[col_idx]
-        cor = mapa_cores.get(nome, list(mapa_cores.values())[col_idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(nome, "-")
-        rotulo_curva = mapa_nomes.get(nome, nome)
-        if estilo == "--":
-            ax.plot(x_ciclos + offsets[col_idx], y_valores, color=cor, linewidth=1.2, linestyle="--", alpha=0.5, zorder=3)
-        ax.scatter(
-            x_ciclos + offsets[col_idx], y_valores, color=cor, s=52,
-            marker=next(marcadores_ciclo), edgecolors=tema["marker_edge"], linewidths=0.85,
-            label=rotulo_curva, zorder=4
-        )
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(0, max(x_ciclos) + 1)
-    ax.set_ylim(min(0, y_min - 10), y_topo * 1.05)
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema)
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ------------------------------------------------------------------------------
-# (10) BET ISOTERMAS
-# ------------------------------------------------------------------------------
-def gerar_plot_bet(
-    fonte_dados, eixo_x_label, eixo_y_label, rotulo_ads, rotulo_des,
-    titulo_legenda, titulo_inset, mapa_cores, mapa_nomes, mapa_estilos,
-    limites_manuais, posicao_legenda, tema, idioma="Português",
-    areas_bet=None, exibir_inset=False,
-    inset_bbox=(0.54, 0.22, 0.38, 0.28), inset_limites=None
-):
-    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
-    if len(tokens_limpos) >= 2:
-        nomes_detectados = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)]
-    else:
-        nomes_detectados = tokens_limpos
-
-    num_cols = df.shape[1]
-    num_amostras = num_cols // 2
-    isotherms = []
-
-    for idx in range(num_amostras):
-        col_x = idx * 2
-        col_y = col_x + 1
-        if col_y >= num_cols: break
-        nome = nomes_detectados[idx] if idx < len(nomes_detectados) else f"Sample {idx + 1}"
-        sub = df.iloc[:, [col_x, col_y]].dropna()
-        if len(sub) == 0: continue
-
-        p_p0 = sub.iloc[:, 0].to_numpy(dtype=float)
-        v_ads = sub.iloc[:, 1].to_numpy(dtype=float)
-        idx_pico = int(np.argmax(p_p0)) if len(p_p0) > 0 else 0
-        tem_dessorcao = (idx_pico < (len(p_p0) - 2)) and (p_p0[-1] < p_p0[idx_pico])
-
-        isotherms.append({
-            "name": nome,
-            "ads_p": p_p0[: idx_pico + 1],
-            "ads_v": v_ads[: idx_pico + 1],
-            "des_p": p_p0[idx_pico :] if tem_dessorcao else np.array([]),
-            "des_v": v_ads[idx_pico :] if tem_dessorcao else np.array([]),
-            "tem_dessorcao": tem_dessorcao,
-            "v_max": np.max(v_ads) if len(v_ads) > 0 else 0,
-        })
-
-    fig, ax = plt.subplots(figsize=(8.8, 5.4), dpi=300)
-    legend_elements = []
-    todos_v_max = [iso["v_max"] for iso in isotherms if iso["v_max"] > 0]
-    v_max = max(todos_v_max) if todos_v_max else 1000
-
-    for idx, iso in enumerate(isotherms):
-        nome = iso["name"]
-        cor = mapa_cores.get(nome, list(mapa_cores.values())[idx % len(mapa_cores)])
-        estilo = mapa_estilos.get(nome, "-")
-        nome_exibido = mapa_nomes.get(nome, nome)
-        val_bet = areas_bet.get(nome, areas_bet.get(nome.replace(" ", ""), None)) if areas_bet else None
-        val_bet_str = fmt_num(val_bet, casas=0, idioma=idioma) if val_bet else None
-        rotulo = rf"{nome_exibido}  $\mathbf{{({val_bet_str}\ m^2\ g^{{-1}})}}$" if val_bet_str else nome_exibido
-
-        ax.plot(iso["ads_p"], iso["ads_v"], color=cor, linewidth=1.7, linestyle=estilo, alpha=0.85, zorder=3)
-        ax.scatter(iso["ads_p"], iso["ads_v"], color=cor, s=28, marker="o", edgecolors=tema["marker_edge"], linewidths=0.6, zorder=4)
-
-        if iso["tem_dessorcao"] and len(iso["des_p"]) > 0:
-            ax.plot(iso["des_p"], iso["des_v"], color=cor, linewidth=1.7, linestyle=estilo, alpha=0.85, zorder=3)
-            ax.scatter(iso["des_p"], iso["des_v"], facecolors=tema["ax_bg"], edgecolors=cor, s=28, marker="o", linewidths=1.2, zorder=5)
-
-        legend_elements.append(Line2D([0], [0], marker="o", color="none", markeredgecolor=tema["marker_edge"], markerfacecolor=cor, markersize=7, label=rotulo))
-
-    if exibir_inset and len(isotherms) > 1:
-        amostras_baixas = [iso for iso in isotherms if iso["v_max"] < (v_max * 0.25)]
-        curvas_inset = isotherms if (inset_limites and any(v is not None for v in inset_limites.values())) else amostras_baixas
-        if curvas_inset:
-            ax_ins = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=inset_bbox, bbox_transform=ax.transAxes)
-            ax_ins.set_facecolor(tema["ax_bg"])
-            for idx, iso in enumerate(isotherms):
-                cor_ins = mapa_cores.get(iso["name"], list(mapa_cores.values())[idx % len(mapa_cores)])
-                estilo_ins = mapa_estilos.get(iso["name"], "-")
-                if iso in curvas_inset:
-                    ax_ins.plot(iso["ads_p"], iso["ads_v"], color=cor_ins, linewidth=1.4, linestyle=estilo_ins, alpha=0.9, zorder=3)
-                    ax_ins.scatter(iso["ads_p"], iso["ads_v"], color=cor_ins, s=18, marker="o", edgecolors=tema["marker_edge"], linewidths=0.4, zorder=4)
-                    if iso["tem_dessorcao"] and len(iso["des_p"]) > 0:
-                        ax_ins.plot(iso["des_p"], iso["des_v"], color=cor_ins, linewidth=1.4, linestyle=estilo_ins, alpha=0.9, zorder=3)
-                        ax_ins.scatter(iso["des_p"], iso["des_v"], facecolors=tema["ax_bg"], edgecolors=cor_ins, s=18, marker="o", linewidths=0.9, zorder=5)
-
-            ax_ins.set_xlim(-0.02, 1.02)
-            if inset_limites:
-                if inset_limites.get("xmin") is not None: ax_ins.set_xlim(left=inset_limites["xmin"])
-                if inset_limites.get("xmax") is not None: ax_ins.set_xlim(right=inset_limites["xmax"])
-                if inset_limites.get("ymin") is not None: ax_ins.set_ylim(bottom=inset_limites["ymin"])
-                if inset_limites.get("ymax") is not None: ax_ins.set_ylim(top=inset_limites["ymax"])
-
-            ax_ins.tick_params(labelsize=8.0, colors=tema["subtext"])
-            aplicar_separador_decimal_eixos(ax_ins, idioma)
-            for sp in ax_ins.spines.values():
-                sp.set_color(tema["spine"])
-            ax_ins.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-            ax_ins.set_title(titulo_inset, fontsize=8.5, fontweight="bold", color=tema["subtext"], pad=3)
-
-    ax.set_xlabel(eixo_x_label, fontsize=12.5, labelpad=8)
-    ax.set_ylabel(eixo_y_label, fontsize=12.5, labelpad=8)
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(-20, v_max * 1.18)
-    ax.grid(True, linestyle=":", alpha=0.4, color=tema["grid"])
-
-    aplicar_ajustes_eixos_e_legenda(ax, limites_manuais, posicao_legenda, tema, handles=legend_elements, title_legenda=titulo_legenda, fontsize_leg=9.5)
-
-    if posicao_legenda != "Ocultar / Hide":
-        leg_principal = ax.get_legend()
-        if leg_principal:
-            ax.add_artist(leg_principal)
-
-        loc_iupac = "upper right" if posicao_legenda != "upper right" else "lower right"
-        elementos_tipo = [
-            Line2D([0], [0], marker="o", color="none", markeredgecolor=tema["marker_edge"], markerfacecolor=tema["subtext"], markersize=6.5, label=rotulo_ads),
-            Line2D([0], [0], marker="o", color="none", markeredgecolor=tema["subtext"], markerfacecolor=tema["ax_bg"], markeredgewidth=1.2, markersize=6.5, label=rotulo_des),
-        ]
-        leg2 = ax.legend(
-            handles=elementos_tipo, frameon=True, facecolor=tema["box_bg"], edgecolor=tema["box_edge"],
-            loc=loc_iupac, labelspacing=0.35, fontsize=9.0
-        )
-        for text in leg2.get_texts():
-            text.set_color(tema["text"])
-
-    estilar_figura_e_eixos(fig, ax, tema, idioma)
-    plt.tight_layout()
-    return fig
-
-
-# ==============================================================================
-# INTERFACE PRINCIPAL (STREAMLIT)
-# ==============================================================================
 def main():
-    caminho_icone_local = Path(__file__).resolve().parent / "vikavolt.ico"
-    if caminho_icone_local.exists():
-        st.sidebar.image(str(caminho_icone_local), width=105)
+    if caminho_icone.exists():
+        st.sidebar.image(str(caminho_icone), width=105)
 
     st.sidebar.title("⚡ PhVolt")
     st.sidebar.caption("Processamento e Gráficos Automatizados")
 
-    # 1. Carregamento do Arquivo no Topo
-    label_upload = "📁 Carregue o arquivo de dados (.txt, .dat, .csv):"
-    arquivo_upload = st.sidebar.file_uploader(
-        label_upload,
-        type=["txt", "dat", "csv"],
-        key="main_file_uploader"
-    )
-
-    if arquivo_upload is not None:
-        nome_atual = arquivo_upload.name
-        nome_anterior = st.session_state.get("nome_arquivo_anterior", None)
-
-        if nome_atual != nome_anterior:
-            st.session_state["dados_carregados"] = arquivo_upload.getvalue()
-            st.session_state["nome_arquivo_anterior"] = nome_atual
-            plt.close("all")
-            st.rerun()
-    else:
-        if "dados_carregados" in st.session_state:
-            del st.session_state["dados_carregados"]
-        if "nome_arquivo_anterior" in st.session_state:
-            del st.session_state["nome_arquivo_anterior"]
-
-    dados_bytes = st.session_state.get("dados_carregados", None)
-
-    st.sidebar.markdown("---")
-
-    # 2. Idioma
+    # 1. Idioma
     idioma = st.sidebar.radio("🌐 Idioma / Language:", ["Português", "Inglês"], key="app_lang")
     textos = TEXTOS_PADRAO[idioma]
 
-    # 3. Seleção de Técnica (Ordem Lógica: Geral -> Baterias -> Supercapacitores -> Caracterização)
-    tecnicas_pt = [
-        "(1) Voltametria Cíclica (CV)",
-        "(2) Espectroscopia de Impedância (EIE / Nyquist)",
-        "(3) Carga/Descarga Galvanostática — GCD (Bateria)",
-        "(4) Rate Capability (Bateria)",
-        "(5) Ciclabilidade Multiplot (Bateria)",
-        "(6) Ciclabilidade & Eficiência Individual (Bateria)",
-        "(7) CGCD Supercapacitor (2 Eletrodos / Janelas)",
-        "(8) CGCD Supercapacitor (3 Eletrodos: Ecell, Ewe, Ece)",
-        "(9) Rate Capability (Supercapacitor)",
-        "(10) Isotermas BET (Adsorção / Dessorção)",
-    ]
-    tecnicas_en = [
-        "(1) Cyclic Voltammetry (CV)",
-        "(2) Electrochemical Impedance (EIS / Nyquist)",
-        "(3) Galvanostatic Charge/Discharge — GCD (Battery)",
-        "(4) Rate Capability (Battery)",
-        "(5) Multiplot Cyclability (Battery)",
-        "(6) Individual Cyclability & Efficiency (Battery)",
-        "(7) Supercapacitor CGCD (2-Electrode / Windows)",
-        "(8) Supercapacitor CGCD (3-Electrode: Ecell, Ewe, Ece)",
-        "(9) Rate Capability (Supercapacitor)",
-        "(10) BET Isotherms (Adsorption / Desorption)",
-    ]
+    # 2. Upload de Arquivo(s) — mantém sempre os arquivos carregados ao alternar entre técnicas
+    if "uploader_reset_counter" not in st.session_state:
+        st.session_state["uploader_reset_counter"] = 0
 
-    lista_tecnicas = tecnicas_pt if idioma == "Português" else tecnicas_en
-
-    if "tecnica_idx" not in st.session_state:
-        st.session_state["tecnica_idx"] = 0
-
-    def atualizar_tecnica():
-        nova_escolha = st.session_state["seletor_tecnica"]
-        st.session_state["tecnica_idx"] = lista_tecnicas.index(nova_escolha)
-
-    escolha_tecnica = st.sidebar.selectbox(
-        "Selecione o ensaio:" if idioma == "Português" else "Select Technique:",
-        lista_tecnicas,
-        index=st.session_state["tecnica_idx"],
-        key="seletor_tecnica",
-        on_change=atualizar_tecnica
+    arquivos_raw = st.sidebar.file_uploader(
+        "📁 Carregue arquivo(s) (.txt, .dat, .csv, .mpr):" if idioma == "Português" else "📁 Upload data file(s) (.txt, .dat, .csv, .mpr):",
+        type=["txt", "dat", "csv", "mpr"],
+        accept_multiple_files=True,
+        key=f"main_file_uploader_{st.session_state['uploader_reset_counter']}",
     )
-    tecnica_idx = st.session_state["tecnica_idx"]
-    tags_tecnicas = ["cv", "eie", "gcd", "rate", "cicl", "ce_ind", "sc_2e", "sc_3e", "sc_rate", "bet"]
+
+    if arquivos_raw is None:
+        arquivos_upload = []
+    elif hasattr(arquivos_raw, "name") and hasattr(arquivos_raw, "getvalue"):
+        arquivos_upload = [arquivos_raw]
+    elif isinstance(arquivos_raw, (list, tuple)):
+        arquivos_upload = [f for f in arquivos_raw if hasattr(f, "name") and hasattr(f, "getvalue")]
+    else:
+        arquivos_upload = []
+
+    if arquivos_upload:
+        if len(arquivos_upload) > 1:
+            if st.sidebar.button(
+                "🗑️ Limpar todos os arquivos" if idioma == "Português" else "🗑️ Clear all uploaded files",
+                use_container_width=True,
+                key="btn_clear_all_files",
+            ):
+                st.session_state["uploader_reset_counter"] += 1
+                for k in [
+                    "dados_carregados",
+                    "nome_arquivo_anterior",
+                    "arquivos_mpr_lista",
+                    "assinatura_arquivos_anterior",
+                    "mpr_ciclos_por_amostra",
+                    "_rate_mpr_zonas_dinamicas",
+                    "_ciclos_gcd_mpr_cache",
+                ]:
+                    st.session_state.pop(k, None)
+                plt.close("all")
+                st.rerun()
+
+        assinatura_atual = tuple((f.name, getattr(f, "size", len(f.getvalue()))) for f in arquivos_upload)
+        if assinatura_atual != st.session_state.get("assinatura_arquivos_anterior"):
+            st.session_state["arquivos_mpr_lista"] = [{"nome": f.name, "bytes": f.getvalue()} for f in arquivos_upload]
+            st.session_state["dados_carregados"] = arquivos_upload[0].getvalue()
+            st.session_state["nome_arquivo_anterior"] = arquivos_upload[0].name
+            st.session_state["assinatura_arquivos_anterior"] = assinatura_atual
+            plt.close("all")
+            st.rerun()
+    else:
+        for k in [
+            "dados_carregados",
+            "nome_arquivo_anterior",
+            "arquivos_mpr_lista",
+            "assinatura_arquivos_anterior",
+            "mpr_ciclos_por_amostra",
+            "_rate_mpr_zonas_dinamicas",
+            "_ciclos_gcd_mpr_cache",
+        ]:
+            if k in st.session_state:
+                del st.session_state[k]
+
+    dados_bytes = st.session_state.get("dados_carregados")
+    arquivos_lista = st.session_state.get("arquivos_mpr_lista", [])
+    modo_mpr_ativo = bool(arquivos_lista and arquivos_lista[0]["nome"].lower().endswith(".mpr"))
+
+    st.sidebar.markdown("---")
+
+    # 3. Seleção do Sistema (Bateria, Supercapacitor ou Outros) e depois Técnica
+    sistemas_opcoes = ["🔋 Bateria", "⚡ Supercapacitor", "🔬 Outros"] if idioma == "Português" else ["🔋 Battery", "⚡ Supercapacitor", "🔬 Others"]
+    sistema_escolhido = st.sidebar.radio(
+        "Sistema / Categoria:" if idioma == "Português" else "System / Category:",
+        sistemas_opcoes,
+        horizontal=True,
+        key="seletor_sistema",
+    )
+    eh_supercap = "Supercapacitor" in sistema_escolhido
+    tag_sis = "sc" if eh_supercap else ("bat" if ("Bateria" in sistema_escolhido or "Battery" in sistema_escolhido) else "out")
+
+    if "Bateria" in sistema_escolhido or "Battery" in sistema_escolhido:
+        opcoes_cat = [
+            ("Voltametria Cíclica (CV)" if idioma == "Português" else "Cyclic Voltammetry (CV)", 0),
+            ("EIE / Nyquist", 1),
+            ("EIE - Bode", 9),
+            ("GCD — Carga/Descarga (Bateria)" if idioma == "Português" else "GCD — Charge/Discharge (Battery)", 2),
+            ("Rate Capability (Bateria)" if idioma == "Português" else "Rate Capability (Battery)", 3),
+            ("Ciclabilidade Multiplot (Bateria)" if idioma == "Português" else "Multiplot Cyclability (Battery)", 4),
+            ("Ciclabilidade & Eficiência Individual" if idioma == "Português" else "Cyclability & Efficiency Individual", 5),
+        ]
+    elif eh_supercap:
+        opcoes_cat = [
+            ("Voltametria Cíclica (CV)" if idioma == "Português" else "Cyclic Voltammetry (CV)", 0),
+            ("EIE / Nyquist", 1),
+            ("EIE - Bode", 9),
+            ("CGCD (2 Eletrodos / Janelas)" if idioma == "Português" else "GCD (2-Electrode / Windows)", 6),
+            ("CGCD (3 Eletrodos: Ecell, Ewe, Ece)" if idioma == "Português" else "GCD (3-Electrode: Ecell, Ewe, Ece)", 7),
+        ]
+    else:
+        opcoes_cat = [
+            ("BET (Adsorção / Dessorção)" if idioma == "Português" else "BET (Adsorption / Desorption)", 8),
+            ("Voltametria Cíclica (CV)" if idioma == "Português" else "Cyclic Voltammetry (CV)", 0),
+            ("EIE / Nyquist", 1),
+            ("EIE - Bode", 9),
+        ]
+
+    nomes_opcoes_cat = [item[0] for item in opcoes_cat]
+    escolha_tecnica = st.sidebar.selectbox(
+        "Selecione a técnica:" if idioma == "Português" else "Select Technique:",
+        nomes_opcoes_cat,
+        key=f"sel_tec_{sistema_escolhido}",
+    )
+    tecnica_idx = dict(opcoes_cat)[escolha_tecnica]
+    st.session_state["tecnica_idx"] = tecnica_idx
+
+    tags_tecnicas = ["cv", "eie", "gcd", "rate_bat", "cicl", "ce_ind", "sc_2e", "sc_3e", "bet", "bode"]
     tag_tec = tags_tecnicas[tecnica_idx]
 
-    # 4. Esquema Global de Cores e Tema (Claro / Dark Mode)
-    st.sidebar.markdown(f"### 🎨 {'Esquema de Cores & Tema' if idioma == 'Português' else 'Color Scheme & Theme'}")
+    # Controles exclusivos para arquivos brutos BioLogic (.mpr)
+    if modo_mpr_ativo:
+        if tecnica_idx == 7 and len(arquivos_lista) > 1:
+            st.sidebar.info(
+                f"🔌 BioLogic (.mpr): plotando o 1º arquivo ({arquivos_lista[0]['nome']})"
+                if idioma == "Português"
+                else f"🔌 BioLogic (.mpr): plotting 1st file ({arquivos_lista[0]['nome']})"
+            )
+        else:
+            st.sidebar.info(f"🔌 BioLogic (.mpr): {len(arquivos_lista)} arquivo(s)")
 
-    dark_mode_ativo = st.sidebar.toggle(
-        "🌙 Dark Mode (Gráfico Escuro)" if idioma == "Português" else "🌙 Dark Mode (Dark Plot)",
-        value=False,
-        key="plot_dark_mode"
-    )
-    tema_visual = obter_tema_visual(dark_mode_ativo)
-
-    nome_paleta_escolhida = st.sidebar.selectbox(
-        "Paleta Global:" if idioma == "Português" else "Global Palette:",
-        list(PALETAS_DISPONIVEIS.keys()),
-        index=0,
-        key="global_palette_selector"
-    )
-    paleta_ativa = PALETAS_DISPONIVEIS[nome_paleta_escolhida]
-
-    # 5. Cores, Nomes e Estilos de Linha Manuais por Curva
-    mapa_cores_curvas = {}
-    mapa_nomes_curvas = {}
-    mapa_estilos_curvas = {}
-    amostras_detectadas = []
-    if dados_bytes is not None:
-        try:
-            df_temp, tokens_temp = processar_cabecalho_e_dados(dados_bytes)
-            amostras_detectadas = identificar_amostras(df_temp, tokens_temp, tecnica_idx, dados_bytes)
-
-            titulo_custom_curvas = "🖌️ " + ("Cores, Nomes e Estilos por Curva" if idioma == "Português" else "Colors, Names & Styles per Curve")
-            with st.sidebar.expander(titulo_custom_curvas, expanded=False):
-                st.caption("Personalize cor, nome na legenda e traçado de cada curva:" if idioma == "Português" else "Customize color, legend label and line style per curve:")
-                for i, nome_amostra in enumerate(amostras_detectadas):
-                    nome_arquivo_seguro = st.session_state.get("nome_arquivo_anterior", "def")
-
-                    nome_default_limpo = nome_amostra.split(" (")[0] if " (" in nome_amostra else nome_amostra
-                    novo_nome = st.text_input(
-                        f"Nome da Curva {i+1}:" if idioma == "Português" else f"Curve {i+1} Label:",
-                        value=nome_default_limpo,
-                        key=f"rename_{nome_arquivo_seguro}_{tag_tec}_{nome_amostra}_{i}"
+        if tecnica_idx in [0, 1, 2, 6, 7, 9]:
+            # Em CGCD 3 Eletrodos, lista ciclos apenas do 1º arquivo sem apagar os demais da lista
+            arquivos_para_ciclos = [arquivos_lista[0]] if tecnica_idx == 7 else arquivos_lista
+            info_ciclos = listar_ciclos_disponiveis_mpr(arquivos_para_ciclos)
+            mapa_ciclos_sel = {}
+            # Menu de Ciclos por Curva fechado por padrão (expanded=False)
+            with st.sidebar.expander("🔄 " + ("Ciclo(s) por Curva (Padrão: Último)" if idioma == "Português" else "Cycle(s) per Curve (Default: Last)"), expanded=False):
+                for nome_arq_base, lista_cic in info_ciclos.items():
+                    ultimo_cic = [lista_cic[-1]] if lista_cic else [1]
+                    modo_cic = st.radio(
+                        f"📌 {nome_arq_base} ({len(lista_cic)} ciclo(s)):",
+                        ["Último ciclo", "Todos os ciclos", "Escolher ciclo(s)"] if idioma == "Português" else ["Last cycle", "All cycles", "Select cycle(s)"],
+                        index=0,
+                        horizontal=True,
+                        key=f"modo_cic_{tag_tec}_{nome_arq_base}",
                     )
-                    mapa_nomes_curvas[nome_amostra] = novo_nome.strip() if novo_nome.strip() else nome_default_limpo
+                    if modo_cic in ["Último ciclo", "Last cycle"]:
+                        mapa_ciclos_sel[nome_arq_base] = ultimo_cic
+                    elif modo_cic in ["Todos os ciclos", "All cycles"]:
+                        mapa_ciclos_sel[nome_arq_base] = lista_cic
+                    else:
+                        escolhidos = st.multiselect(
+                            f"Ciclos ({nome_arq_base}):",
+                            options=lista_cic,
+                            default=ultimo_cic,
+                            key=f"sel_cic_{tag_tec}_{nome_arq_base}",
+                        )
+                        mapa_ciclos_sel[nome_arq_base] = escolhidos if escolhidos else ultimo_cic
+            st.session_state["mpr_ciclos_por_amostra"] = mapa_ciclos_sel
 
-                    c1, c2 = st.columns([1.6, 1.4])
+
+
+    # 4. Menu Suspenso Separado: Design
+    estilos_padrao_por_tecnica = {
+        0: "Linhas (Lines)",       # CV
+        1: "Scatter + Lines",      # EIE / Nyquist
+        2: "Linhas (Lines)",       # GCD Bateria
+        3: "Pontos (Scatter)",     # Rate Capability Bateria
+        4: "Linhas (Lines)",       # Ciclabilidade Multiplot
+        5: "Scatter + Lines",      # Ciclabilidade & Eficiência Individual
+        6: "Linhas (Lines)",       # CGCD 2E
+        7: "Linhas (Lines)",       # CGCD 3E
+        8: "Scatter + Lines",      # BET
+        9: "Scatter + Lines",      # EIE - Bode
+    }
+    opcoes_tracado = ["Pontos (Scatter)", "Linhas (Lines)", "Scatter + Lines"]
+    idx_tracado_padrao = opcoes_tracado.index(estilos_padrao_por_tecnica[tecnica_idx])
+
+    mapa_cores, mapa_estilos, mapa_nomes, amostras_detectadas = {}, {}, {}, []
+    with st.sidebar.expander("🎨 Design", expanded=False):
+        dark_mode_ativo = st.toggle(
+            "🌙 Dark Mode (Gráfico Escuro)" if idioma == "Português" else "🌙 Dark Mode (Dark Plot)",
+            value=False, key="plot_dark_mode",
+        )
+        tema_visual = obter_tema_visual(dark_mode_ativo)
+
+        nome_paleta_escolhida = st.selectbox(
+            "Paleta Global:" if idioma == "Português" else "Global Palette:",
+            list(PALETAS_DISPONIVEIS.keys()), index=0, key="global_palette_selector",
+        )
+        paleta_ativa = PALETAS_DISPONIVEIS[nome_paleta_escolhida]
+
+        modo_tracado_selecionado = st.radio(
+            "Estilo de Plotagem:" if idioma == "Português" else "Plot Style:",
+            opcoes_tracado,
+            index=idx_tracado_padrao,
+            horizontal=True,
+            key=f"modo_tracado_design_{tag_tec}",
+        )
+
+        if dados_bytes is not None:
+            try:
+                df_temp, tokens_temp = processar_cabecalho_e_dados(dados_bytes)
+                amostras_detectadas = identificar_amostras(df_temp, tokens_temp, tecnica_idx)
+
+                st.markdown("---")
+                st.caption("🖌️ " + ("Cores, Nomes e Tracejado por Amostra" if idioma == "Português" else "Custom Colors, Names & Dashed Lines"))
+                nome_arq_seg = st.session_state.get("nome_arquivo_anterior", "def")
+                for i, nome_amostra in enumerate(amostras_detectadas):
+                    c_nome, c_cor, c_dash = st.columns([2.2, 1.0, 1.2])
+                    novo_nome = c_nome.text_input(
+                        f"Curva {i+1}", value=nome_amostra, label_visibility="collapsed",
+                        key=f"nm_{nome_arq_seg}_{tag_tec}_{nome_amostra}_{i}",
+                    )
+                    mapa_nomes[nome_amostra] = novo_nome.strip() if novo_nome.strip() else nome_amostra
+
                     cor_padrao = paleta_ativa[i % len(paleta_ativa)]
                     if dark_mode_ativo and cor_padrao in ["#334155", "#0f172a"]:
                         cor_padrao = "#e2e8f0"
-
-                    chave_color_picker = f"cp_{nome_arquivo_seguro}_{tag_tec}_{nome_paleta_escolhida}_{dark_mode_ativo}_{nome_amostra}_{i}"
-                    cor_escolhida = c1.color_picker("Cor" if idioma == "Português" else "Color", cor_padrao, key=chave_color_picker)
-                    mapa_cores_curvas[nome_amostra] = cor_escolhida
-
-                    default_dash = True if (tecnica_idx == 5 and i == 0) else False
-                    e_tracejado = c2.checkbox(
-                        "Tracejada" if idioma == "Português" else "Dashed",
-                        value=default_dash,
-                        key=f"chk_dash_{nome_arquivo_seguro}_{tag_tec}_{nome_amostra}_{i}"
+                    mapa_cores[nome_amostra] = c_cor.color_picker(
+                        f"Cor {i+1}", cor_padrao, label_visibility="collapsed",
+                        key=f"cp_{nome_arq_seg}_{tag_tec}_{nome_paleta_escolhida}_{dark_mode_ativo}_{nome_amostra}_{i}",
                     )
-                    mapa_estilos_curvas[nome_amostra] = "--" if e_tracejado else "-"
 
-                    if i < len(amostras_detectadas) - 1:
-                        st.markdown("<hr style='margin: 0.4rem 0; opacity: 0.25;'>", unsafe_allow_html=True)
-        except Exception:
-            pass
+                    default_dash = True if ((tecnica_idx == 5 and i == 0) or (tecnica_idx == 7 and i == 2)) else False
+                    e_tracejado = c_dash.checkbox(
+                        "---", value=default_dash,
+                        key=f"chk_dash_{nome_arq_seg}_{tag_tec}_{nome_amostra}_{i}",
+                    )
+                    mapa_estilos[nome_amostra] = "--" if e_tracejado else "-"
+            except Exception:
+                pass
 
-    # ==========================================================================
-    # 6. CONFIGURAÇÃO DOS EIXOS, LIMITES MANUAIS E LEGENDA
-    # ==========================================================================
+    # 5. Configuração dos Eixos & Legenda
+    cv_x_padrao = textos["cv_x_sc"] if eh_supercap else textos["cv_x"]
     rotulos_default_x = [
-        textos["cv_x"], textos["eie_x"], textos["gcd_x"], textos["rate_x"],
-        textos["ciclabilidade_x"], textos["ce_x"], textos["sc_2e_x"],
-        textos["sc_3e_x"], textos["sc_rate_x"], textos["bet_x"]
+        cv_x_padrao, textos["eie_x"], textos["gcd_x"], textos["rate_bat_x"],
+        textos["cicl_x"], textos["ce_x"], textos["sc_2e_x"], textos["sc_3e_x"],
+        textos["bet_x"], textos["bode_x"],
     ]
     rotulos_default_y = [
-        textos["cv_y"], textos["eie_y"], textos["gcd_y"], textos["rate_y"],
-        textos["ciclabilidade_y"], textos["ce_y1"], textos["sc_2e_y"],
-        textos["sc_3e_y1"], textos["sc_rate_y"], textos["bet_y"]
+        textos["cv_y"], textos["eie_y"], textos["gcd_y"], textos["rate_bat_y"],
+        textos["cicl_y"], textos["ce_y1"], textos["sc_2e_y"], textos["sc_3e_y1"],
+        textos["bet_y"], textos["bode_y1"],
     ]
 
-    def converter_float_seguro(val_str):
-        if val_str and val_str.strip():
-            try:
-                return float(val_str.replace(",", "."))
-            except ValueError:
-                return None
-        return None
-
-    tem_eixo_y2 = tecnica_idx in [5, 7]
-
-    titulo_expander_eixos = "⚙️ " + ("Configuração dos Eixos & Legenda" if idioma == "Português" else "Axis & Legend Settings")
-    with st.sidebar.expander(titulo_expander_eixos, expanded=False):
-        eixo_x_input = st.text_input(
-            "Eixo X" if idioma == "Português" else "X Axis",
-            rotulos_default_x[tecnica_idx],
-            key=f"eixo_x_{tag_tec}_{idioma}"
-        )
-        label_y1_ui = (
-            "Eixo Y" if not tem_eixo_y2
-            else ("Eixo Y1 (Capacidade)" if tecnica_idx == 5 else "Eixo Y1 (Ecell)")
-        ) if idioma == "Português" else (
-            "Y Axis" if not tem_eixo_y2
-            else ("Y1 Axis (Capacity)" if tecnica_idx == 5 else "Y1 Axis (Ecell)")
-        )
-        eixo_y_input = st.text_input(
-            label_y1_ui,
-            rotulos_default_y[tecnica_idx],
-            key=f"eixo_y_{tag_tec}_{idioma}"
-        )
+    with st.sidebar.expander("⚙️ " + ("Configuração dos Eixos & Legenda" if idioma == "Português" else "Axis & Legend Settings"), expanded=False):
+        eixo_x_input = st.text_input("Eixo X" if idioma == "Português" else "X Axis", rotulos_default_x[tecnica_idx], key=f"eixo_x_{tag_tec}_{tag_sis}_{idioma}")
+        eixo_y_input = st.text_input("Eixo Y1" if tecnica_idx in [5, 7, 9] else "Eixo Y", rotulos_default_y[tecnica_idx], key=f"eixo_y_{tag_tec}_{tag_sis}_{idioma}")
 
         eixo_y2_input = ""
-        if tem_eixo_y2:
-            default_y2_txt = textos["ce_y2"] if tecnica_idx == 5 else textos["sc_3e_y2"]
-            label_y2_ui = (
-                ("Eixo Y2 (Eficiência)" if tecnica_idx == 5 else "Eixo Y2 (Ewe / Ece)")
-                if idioma == "Português"
-                else ("Y2 Axis (Efficiency)" if tecnica_idx == 5 else "Y2 Axis (Ewe / Ece)")
-            )
-            eixo_y2_input = st.text_input(
-                label_y2_ui,
-                default_y2_txt,
-                key=f"eixo_y2_{tag_tec}_{idioma}"
-            )
+        if tecnica_idx in [5, 7, 9]:
+            default_y2 = textos["ce_y2"] if tecnica_idx == 5 else (textos["sc_3e_y2"] if tecnica_idx == 7 else textos["bode_y2"])
+            eixo_y2_input = st.text_input("Eixo Y2" if idioma == "Português" else "Y2 Axis", default_y2, key=f"eixo_y2_{tag_tec}_{idioma}")
 
         st.markdown("---")
-        st.caption("Limites Manuais (deixe em branco para automático):" if idioma == "Português" else "Manual Limits (leave blank for auto):")
-        col_lim_x1, col_lim_x2 = st.columns(2)
-        xlim_min_str = col_lim_x1.text_input("X Mín:", "", key=f"xlim_min_{tag_tec}")
-        xlim_max_str = col_lim_x2.text_input("X Máx:", "", key=f"xlim_max_{tag_tec}")
+        cx1, cx2 = st.columns(2)
+        xlim_min = _converter_float(cx1.text_input("X Mín:", "", key=f"xlim_min_{tag_tec}"))
+        xlim_max = _converter_float(cx2.text_input("X Máx:", "", key=f"xlim_max_{tag_tec}"))
 
-        col_lim_y1, col_lim_y2 = st.columns(2)
-        ylim_min_str = col_lim_y1.text_input("Y Mín:" if not tem_eixo_y2 else "Y1 Mín:", "", key=f"ylim_min_{tag_tec}")
-        ylim_max_str = col_lim_y2.text_input("Y Máx:" if not tem_eixo_y2 else "Y1 Máx:", "", key=f"ylim_max_{tag_tec}")
+        cy1, cy2 = st.columns(2)
+        ylim_min = _converter_float(cy1.text_input("Y1 Mín:" if tecnica_idx in [5, 7, 9] else "Y Mín:", "", key=f"ylim_min_{tag_tec}"))
+        ylim_max = _converter_float(cy2.text_input("Y1 Máx:" if tecnica_idx in [5, 7, 9] else "Y Máx:", "", key=f"ylim_max_{tag_tec}"))
 
-        y2lim_min_str, y2lim_max_str = "", ""
-        if tem_eixo_y2:
-            col_lim_y2_1, col_lim_y2_2 = st.columns(2)
+        y2lim_min, y2lim_max = None, None
+        if tecnica_idx in [5, 7, 9]:
+            cy2_1, cy2_2 = st.columns(2)
             def_y2_min = "0" if tecnica_idx == 5 else ""
             def_y2_max = "110" if tecnica_idx == 5 else ""
-            y2lim_min_str = col_lim_y2_1.text_input("Y2 Mín:", def_y2_min, key=f"y2lim_min_{tag_tec}")
-            y2lim_max_str = col_lim_y2_2.text_input("Y2 Máx:", def_y2_max, key=f"y2lim_max_{tag_tec}")
+            y2lim_min = _converter_float(cy2_1.text_input("Y2 Mín:", def_y2_min, key=f"y2lim_min_{tag_tec}"))
+            y2lim_max = _converter_float(cy2_2.text_input("Y2 Máx:", def_y2_max, key=f"y2lim_max_{tag_tec}"))
+
+        st.markdown("---")
+        st.caption("📏 " + ("Passo e Subdivisões dos Eixos (vazio = auto)" if idioma == "Português" else "Axis Step & Subdivisions (blank = auto)"))
+        cs_x, cm_x = st.columns(2)
+        x_step = _converter_float(cs_x.text_input("Passo X (ex: 100):" if idioma == "Português" else "X Step (e.g. 100):", "", key=f"x_step_{tag_tec}"))
+        x_minor = _converter_float(cm_x.text_input("Subdiv. X (ex: 2):" if idioma == "Português" else "X Subdiv. (e.g. 2):", "", key=f"x_minor_{tag_tec}"))
+
+        cs_y, cm_y = st.columns(2)
+        y_step = _converter_float(cs_y.text_input("Passo Y1:" if tecnica_idx in [5, 7, 9] else "Passo Y:", "", key=f"y_step_{tag_tec}"))
+        y_minor = _converter_float(cm_y.text_input("Subdiv. Y1:" if tecnica_idx in [5, 7, 9] else "Subdiv. Y:", "", key=f"y_minor_{tag_tec}"))
+
+        y2_step, y2_minor = None, None
+        if tecnica_idx in [5, 7, 9]:
+            cs_y2, cm_y2 = st.columns(2)
+            y2_step = _converter_float(cs_y2.text_input("Passo Y2:", "", key=f"y2_step_{tag_tec}"))
+            y2_minor = _converter_float(cm_y2.text_input("Subdiv. Y2:", "", key=f"y2_minor_{tag_tec}"))
 
         limites_manuais = {
-            "xlim": (converter_float_seguro(xlim_min_str), converter_float_seguro(xlim_max_str)),
-            "ylim": (converter_float_seguro(ylim_min_str), converter_float_seguro(ylim_max_str)),
-            "y2lim": (converter_float_seguro(y2lim_min_str), converter_float_seguro(y2lim_max_str)),
+            "xlim": (xlim_min, xlim_max),
+            "ylim": (ylim_min, ylim_max),
+            "y2lim": (y2lim_min, y2lim_max),
+            "x_step": x_step,
+            "y_step": y_step,
+            "y2_step": y2_step,
+            "x_minor": x_minor,
+            "y_minor": y_minor,
+            "y2_minor": y2_minor,
         }
 
         posicao_legenda = None
+        legenda_horizontal = False
         if tecnica_idx != 5:
-            opcoes_legenda = ["upper right", "upper left", "lower right", "lower left", "best", "Ocultar / Hide"]
-            idx_default_leg = (
-                1 if tecnica_idx in [1, 9]
-                else (3 if tecnica_idx in [3, 8]
-                else (2 if tecnica_idx == 2 else 0))
-            )
-            posicao_legenda = st.selectbox(
-                "Posição da Legenda:" if idioma == "Português" else "Legend Position:",
-                opcoes_legenda,
-                index=idx_default_leg,
-                key=f"leg_pos_{tag_tec}"
-            )
-
-    # ==========================================================================
-    # 7. PARÂMETROS ESPECÍFICOS DA TÉCNICA
-    # ==========================================================================
-    cv_speed_input = r"0,3\ \mathrm{mV\ s^{-1}}" if idioma == "Português" else r"0.3\ \mathrm{mV\ s^{-1}}"
-    exibir_setas_cv = True
-    pos_carga_cv = (0.35, 0.58)
-    pos_descarga_cv = (0.65, 0.38)
-
-    circuito_upload = None
-    pos_circuito_eie = (0.62, 0.78)
-    zoom_circuito_eie = 0.36
-    exibir_inset_eie = False
-    inset_bbox_eie = (0.48, 0.18, 0.44, 0.34)
-    inset_limites_eie = {}
-    aspect_equal_eie = False
-    modo_plot_eie = "Pontos + Linha"
-
-    exibir_delta_e_gcd = True
-    delta_e_texto_gcd = r"$\Delta E$"
-    delta_e_x_gcd = 0.40
-    delta_e_y_topo_gcd = 0.58
-    delta_e_y_base_gcd = 0.46
-    delta_e_lado_gcd = "Direita / Right"
-
-    rate_tag_input = textos["ciclabilidade_rate"]
-    pos_rate_multi = (0.04, 0.93)
-
-    ce_rate_input = textos["ciclabilidade_rate"]
-    pos_rate_ce = (0.04, 0.78)
-    ce_nome_amostra = "CHZn700@S60"
-    ce_patamar_ref = 0.0
-    modo_cap_ce = "Pontos + Linha"
-    modo_eff_ce = "Pontos + Linha"
-
-    exibir_ir_sc = False
-    ir_texto_sc = r"$IR_{drop}$"
-    ir_x_sc = 0.25
-    ir_y_topo_sc = 0.88
-    ir_y_base_sc = 0.78
-
-    exibir_zero_3e = True
-    nome_amostra_3e = "Amostra / Sample"
-    pos_amostra_3e = (0.05, 0.90)
-
-    protocolo_sc_rate = "0.5, 1, 2, 5, 10, 0.5"
-    ciclos_por_degrau_sc = 5
-
-    areas_bet_dict = {}
-    exibir_inset_check = False
-    inset_bbox_bet = (0.54, 0.22, 0.38, 0.28)
-    inset_limites_bet = {}
-
-    titulo_expander_params = "🔬 " + ("Parâmetros da Técnica" if idioma == "Português" else "Technique Parameters")
-    with st.sidebar.expander(titulo_expander_params, expanded=False):
-        if tecnica_idx == 0:  # CV
-            cv_speed_input = st.text_input(
-                "Velocidade de Varredura" if idioma == "Português" else "Scan Rate",
-                cv_speed_input,
-                key=f"cv_v_{tag_tec}_{idioma}"
-            )
-            exibir_setas_cv = st.checkbox(
-                "Exibir indicadores Carga / Descarga" if idioma == "Português" else "Show Charge / Discharge indicators",
-                value=True,
-                key="cv_show_arrows"
-            )
-            if exibir_setas_cv:
-                st.caption("Posição relativa de 'Carga →':" if idioma == "Português" else "Relative position of 'Charge →':")
-                c_chg1, c_chg2 = st.columns(2)
-                chg_x = c_chg1.slider("X Carga", 0.0, 0.95, 0.35, 0.02, key="cv_chg_x")
-                chg_y = c_chg2.slider("Y Carga", 0.0, 0.95, 0.58, 0.02, key="cv_chg_y")
-                pos_carga_cv = (chg_x, chg_y)
-
-                st.caption("Posição relativa de '← Descarga':" if idioma == "Português" else "Relative position of '← Discharge':")
-                c_dch1, c_dch2 = st.columns(2)
-                dch_x = c_dch1.slider("X Desc.", 0.0, 0.95, 0.65, 0.02, key="cv_dch_x")
-                dch_y = c_dch2.slider("Y Desc.", 0.0, 0.95, 0.38, 0.02, key="cv_dch_y")
-                pos_descarga_cv = (dch_x, dch_y)
-
-        elif tecnica_idx == 1:  # EIE / Nyquist
-            opcoes_modo_eie = ["Pontos + Linha", "Apenas Linha"] if idioma == "Português" else ["Scatter + Line", "Line Only"]
-            sel_modo_eie = st.radio(
-                "Estilo das Curvas:" if idioma == "Português" else "Curve Style:",
-                opcoes_modo_eie,
-                index=0,
-                horizontal=True,
-                key="eie_plot_mode"
-            )
-            modo_plot_eie = "Apenas Linha" if sel_modo_eie in ["Apenas Linha", "Line Only"] else "Pontos + Linha"
-
-            aspect_equal_eie = st.checkbox(
-                "Forçar proporção 1:1 no gráfico principal" if idioma == "Português" else "Force 1:1 aspect ratio on main plot",
+            opcoes_legenda = ["best", "upper right", "upper left", "lower right", "lower left", "Ocultar / Hide"]
+            posicao_legenda = st.selectbox("Posição da Legenda:" if idioma == "Português" else "Legend Position:", opcoes_legenda, index=0, key=f"leg_pos_{tag_tec}")
+            legenda_horizontal = st.checkbox(
+                "Legenda em 1 linha (Horizontal)" if idioma == "Português" else "Single-row Legend (Horizontal)",
                 value=False,
-                key="eie_aspect_equal"
+                disabled=(posicao_legenda == "Ocultar / Hide"),
+                key=f"leg_horiz_{tag_tec}",
             )
+
+    # 6. Parâmetros Específicos da Técnica
+    params = {}
+    precisa_massa_ativa = (tecnica_idx in [2, 3, 4, 5, 6, 7]) or (tecnica_idx == 0 and eh_supercap)
+    with st.sidebar.expander("🔬 " + ("Parâmetros da Técnica" if idioma == "Português" else "Technique Parameters"), expanded=False):
+        if precisa_massa_ativa:
+            st.number_input(
+                "⚖️ Massa ativa total / célula (mg):" if (idioma == "Português" and tecnica_idx == 7)
+                else ("⚖️ Total / cell active mass (mg):" if tecnica_idx == 7
+                else ("⚖️ Massa ativa (mg):" if idioma == "Português" else "⚖️ Active mass (mg):")),
+                min_value=0.001,
+                value=float(st.session_state.get("mpr_massa_ativa_mg", 1.000)),
+                step=0.100,
+                format="%.3f",
+                key="mpr_massa_ativa_mg",
+            )
+            if tecnica_idx == 7:
+                cm_pos, cm_neg = st.columns(2)
+                params["massa_pos_mg"] = cm_pos.number_input(
+                    "Massa Ewe (+) [mg]:" if idioma == "Português" else "Mass Ewe (+) [mg]:",
+                    min_value=0.001,
+                    value=round(float(st.session_state.get("mpr_massa_ativa_mg", 1.000)) / 2.0, 3),
+                    step=0.100,
+                    format="%.3f",
+                    key="sc3e_massa_pos_mg",
+                )
+                params["massa_neg_mg"] = cm_neg.number_input(
+                    "Massa Ece (-) [mg]:" if idioma == "Português" else "Mass Ece (-) [mg]:",
+                    min_value=0.001,
+                    value=round(float(st.session_state.get("mpr_massa_ativa_mg", 1.000)) / 2.0, 3),
+                    step=0.100,
+                    format="%.3f",
+                    key="sc3e_massa_neg_mg",
+                )
             st.markdown("---")
-            exibir_inset_eie = st.checkbox(
-                "Exibir Inset (Altas Frequências - 1:1)" if idioma == "Português" else "Show Inset (High Frequencies - 1:1)",
-                value=False,
-                key="eie_inset_check"
-            )
-            if exibir_inset_eie:
-                st.caption("Posição do Inset no gráfico:" if idioma == "Português" else "Inset Position:")
-                ce_ins1, ce_ins2 = st.columns(2)
-                eins_x = ce_ins1.slider("Posição X", 0.05, 0.60, 0.48, 0.02, key="eie_ins_x")
-                eins_y = ce_ins2.slider("Posição Y", 0.05, 0.60, 0.18, 0.02, key="eie_ins_y")
-                inset_bbox_eie = (eins_x, eins_y, 0.44, 0.34)
-
-                st.caption("Eixos do Inset (opcional):" if idioma == "Português" else "Inset Axes Limits (optional):")
-                cei_x1, cei_x2 = st.columns(2)
-                eix_min = cei_x1.text_input("Inset Z' Mín:", "", key="eie_ix_min")
-                eix_max = cei_x2.text_input("Inset Z' Máx:", "", key="eie_ix_max")
-                cei_y1, cei_y2 = st.columns(2)
-                eiy_min = cei_y1.text_input("Inset -Z'' Mín:", "", key="eie_iy_min")
-                eiy_max = cei_y2.text_input("Inset -Z'' Máx:", "", key="eie_iy_max")
-
-                inset_limites_eie = {
-                    "xmin": converter_float_seguro(eix_min),
-                    "xmax": converter_float_seguro(eix_max),
-                    "ymin": converter_float_seguro(eiy_min),
-                    "ymax": converter_float_seguro(eiy_max),
-                }
-
-            st.markdown("---")
-            circuito_upload = st.file_uploader(
-                "Circuito Equivalente (PNG/JPG)" if idioma == "Português" else "Equivalent Circuit (PNG/JPG)",
-                type=["png", "jpg", "jpeg"],
-                key="circuit_uploader"
-            )
-            if circuito_upload is not None:
-                st.caption("Posição e Escala do Circuito:" if idioma == "Português" else "Circuit Position & Scale:")
-                c_eie1, c_eie2 = st.columns(2)
-                circ_x = c_eie1.slider("Posição X", 0.05, 0.95, 0.62, 0.02, key="eie_circ_x")
-                circ_y = c_eie2.slider("Posição Y", 0.05, 0.95, 0.78, 0.02, key="eie_circ_y")
-                pos_circuito_eie = (circ_x, circ_y)
-                zoom_circuito_eie = st.slider("Tamanho (Zoom)", 0.15, 0.80, 0.36, 0.02, key="eie_circ_zoom")
-
-        elif tecnica_idx == 2:  # GCD Bateria
-            exibir_delta_e_gcd = st.checkbox(
-                "Exibir indicador de polarização (ΔE)" if idioma == "Português" else "Show polarization indicator (ΔE)",
-                value=True,
-                key="gcd_show_delta_e"
-            )
-            if exibir_delta_e_gcd:
-                delta_e_texto_gcd = st.text_input(
-                    "Texto do Indicador:" if idioma == "Português" else "Indicator Text:",
-                    value=r"$\Delta E$",
-                    key="gcd_delta_e_text"
-                )
-                delta_e_x_gcd = st.slider(
-                    "Posição Horizontal (X):" if idioma == "Português" else "Horizontal Position (X):",
-                    0.05, 0.90, 0.40, 0.01,
-                    key="gcd_de_x"
-                )
-                c_de1, c_de2 = st.columns(2)
-                delta_e_y_topo_gcd = c_de1.slider(
-                    "Ponta Superior (Carga):" if idioma == "Português" else "Top Tip (Charge):",
-                    0.05, 0.95, 0.58, 0.01,
-                    key="gcd_de_y_top"
-                )
-                delta_e_y_base_gcd = c_de2.slider(
-                    "Ponta Inferior (Descarga):" if idioma == "Português" else "Bottom Tip (Discharge):",
-                    0.05, 0.95, 0.46, 0.01,
-                    key="gcd_de_y_bot"
-                )
-                delta_e_lado_gcd = st.radio(
-                    "Posição do Texto:" if idioma == "Português" else "Text Alignment:",
-                    ["Direita / Right", "Esquerda / Left"],
-                    index=0,
-                    horizontal=True,
-                    key="gcd_de_side"
-                )
-
-        elif tecnica_idx == 3:  # Rate Capability Bateria
-            st.caption("Protocolo padrão de bateria: 0,1 C → 0,2 C → 0,5 C → 1 C → 2 C → 0,1 C." if idioma == "Português" else "Standard battery C-rate protocol: 0.1 C → 0.2 C → 0.5 C → 1 C → 2 C → 0.1 C.")
-
-        elif tecnica_idx == 4:  # Ciclabilidade Multiplot Bateria
-            rate_tag_input = st.text_input(
-                "Tag de Taxa" if idioma == "Português" else "Rate Tag",
-                textos["ciclabilidade_rate"],
-                key=f"rate_tag_{tag_tec}_{idioma}"
-            )
-            st.caption("Posição do Balão de Taxa:" if idioma == "Português" else "Rate Badge Position:")
-            cr1, cr2 = st.columns(2)
-            rx_multi = cr1.slider("X Taxa", 0.0, 0.90, 0.04, 0.02, key="cicl_rate_x")
-            ry_multi = cr2.slider("Y Taxa", 0.0, 0.95, 0.93, 0.02, key="cicl_rate_y")
-            pos_rate_multi = (rx_multi, ry_multi)
-
-        elif tecnica_idx == 5:  # CE Individual Bateria
-            opcoes_modo_plot = ["Pontos + Linha", "Apenas Linha"] if idioma == "Português" else ["Scatter + Line", "Line Only"]
-            sel_cap = st.radio(
-                "Estilo da Curva de Capacidade:" if idioma == "Português" else "Capacity Curve Style:",
-                opcoes_modo_plot,
-                index=0,
+        if tecnica_idx == 0:
+            st.caption("⚡ " + ("Taxa de Varredura para Cálculos (mV/s)" if idioma == "Português" else "Scan Rate for Calculations (mV/s)"))
+            modo_taxa_cv = st.radio(
+                "Modo de entrada (Taxa CV):" if idioma == "Português" else "Scan Rate input mode:",
+                ["Taxa única (mV/s)", "Discriminada por curva"] if idioma == "Português" else ["Single rate (mV/s)", "Per curve"],
                 horizontal=True,
-                key="ce_mode_cap"
+                key="cv_modo_taxa_input",
             )
-            modo_cap_ce = "Apenas Linha" if sel_cap in ["Apenas Linha", "Line Only"] else "Pontos + Linha"
-
-            sel_eff = st.radio(
-                "Estilo da Curva de Eficiência:" if idioma == "Português" else "Efficiency Curve Style:",
-                opcoes_modo_plot,
-                index=0,
-                horizontal=True,
-                key="ce_mode_eff"
-            )
-            modo_eff_ce = "Apenas Linha" if sel_eff in ["Apenas Linha", "Line Only"] else "Pontos + Linha"
-
-            st.markdown("---")
-            ce_rate_input = st.text_input(
-                "Taxa de Ciclagem (Rate Tag):" if idioma == "Português" else "Cycling Rate (Rate Tag):",
-                value=textos["ciclabilidade_rate"],
-                key="ce_rate_tag_input"
-            )
-            st.caption("Posição do Balão de Taxa:" if idioma == "Português" else "Rate Badge Position:")
-            cr_ce1, cr_ce2 = st.columns(2)
-            rx_ce = cr_ce1.slider("X Taxa", 0.0, 0.90, 0.04, 0.02, key="ce_rate_x")
-            ry_ce = cr_ce2.slider("Y Taxa", 0.0, 0.95, 0.78, 0.02, key="ce_rate_y")
-            pos_rate_ce = (rx_ce, ry_ce)
-
-            ce_nome_amostra = st.text_input(
-                "Nome da Amostra (canto inferior):" if idioma == "Português" else "Sample Name (lower corner):",
-                value="CHZn700@S60",
-                key="ce_sample_name_input"
-            )
-            val_patamar_str = st.text_input(
-                "Linha de Patamar de Referência (ex: 330 mAh/g, 0 para desativar):" if idioma == "Português" else "Reference Plateau Line (e.g. 330 mAh/g, 0 to disable):",
-                value="0",
-                key="ce_patamar_input"
-            )
-            try:
-                ce_patamar_ref = float(val_patamar_str.replace(",", "."))
-            except ValueError:
-                ce_patamar_ref = 0.0
-
-        elif tecnica_idx == 6:  # CGCD Supercapacitor (2 Eletrodos / Janelas)
-            exibir_ir_sc = st.checkbox(
-                "Exibir indicador de queda ôhmica (IR drop)" if idioma == "Português" else "Show ohmic drop indicator (IR drop)",
-                value=False,
-                key="sc_show_ir"
-            )
-            if exibir_ir_sc:
-                ir_texto_sc = st.text_input(
-                    "Texto do Indicador:" if idioma == "Português" else "Indicator Text:",
-                    value=r"$IR_{drop}$",
-                    key="sc_ir_text"
-                )
-                ir_x_sc = st.slider("Posição X (Vértice):", 0.05, 0.90, 0.25, 0.01, key="sc_ir_x")
-                c_ir1, c_ir2 = st.columns(2)
-                ir_y_topo_sc = c_ir1.slider("Topo:", 0.05, 0.95, 0.88, 0.01, key="sc_ir_y_top")
-                ir_y_base_sc = c_ir2.slider("Base:", 0.05, 0.95, 0.78, 0.01, key="sc_ir_y_bot")
-
-        elif tecnica_idx == 7:  # CGCD Supercapacitor (3 Eletrodos: Ecell, Ewe, Ece)
-            nome_amostra_3e = st.text_input(
-                "Balão de Identificação da Amostra:" if idioma == "Português" else "Sample Identification Badge:",
-                value="Amostra / Sample",
-                key="sc_3e_sample_badge"
-            )
-            st.caption("Posição do Balão da Amostra:" if idioma == "Português" else "Sample Badge Position:")
-            c_3e1, c_3e2 = st.columns(2)
-            s3e_x = c_3e1.slider("X Balão", 0.0, 0.90, 0.05, 0.02, key="sc_3e_badge_x")
-            s3e_y = c_3e2.slider("Y Balão", 0.0, 0.95, 0.90, 0.02, key="sc_3e_badge_y")
-            pos_amostra_3e = (s3e_x, s3e_y)
-
-            exibir_zero_3e = st.checkbox(
-                "Exibir linha de referência em 0 V (Eixo Y2)" if idioma == "Português" else "Show 0 V reference line (Y2 Axis)",
-                value=True,
-                key="sc_3e_zero_line"
-            )
-
-        elif tecnica_idx == 8:  # Rate Capability (Supercapacitor)
-            protocolo_sc_rate = st.text_input(
-                "Densidades de Corrente (A/g, separadas por vírgula):" if idioma == "Português" else "Current Densities (A/g, comma-separated):",
-                value="0.5, 1, 2, 5, 10, 0.5",
-                key="sc_rate_protocol"
-            )
-            ciclos_por_degrau_sc = st.number_input(
-                "Ciclos por degrau:" if idioma == "Português" else "Cycles per step:",
-                min_value=1,
-                max_value=500,
-                value=5,
-                step=1,
-                key="sc_rate_cycles_step"
-            )
-
-        elif tecnica_idx == 9:  # BET
-            st.markdown(
-                "**Áreas Específicas BET ($S_{BET}$ em $\mathrm{m^2\ g^{-1}}$):**"
-                if idioma == "Português"
-                else "**Specific BET Surface Area ($S_{BET}$ in $\mathrm{m^2\ g^{-1}}$):**"
-            )
-            if dados_bytes is not None and amostras_detectadas:
-                for amostra in amostras_detectadas:
-                    nome_exibicao = mapa_nomes_curvas.get(amostra, amostra)
-                    val_str = st.text_input(
-                        f"{nome_exibicao}:",
+            taxas_cv_dict = {}
+            if modo_taxa_cv in ["Taxa única (mV/s)", "Single rate (mV/s)"]:
+                taxa_unica_cv = _converter_float(
+                    st.text_input(
+                        "Taxa de varredura (mV/s):" if idioma == "Português" else "Scan rate (mV/s):",
                         value="",
-                        placeholder="ex: 1200",
-                        key=f"bet_txt_input_{amostra}"
+                        placeholder="ex: 10 (vazio = auto .mpr / nome)",
+                        key="cv_taxa_unica_num",
                     )
-                    if val_str.strip():
-                        try:
-                            areas_bet_dict[amostra] = float(val_str.replace(",", "."))
-                        except ValueError:
-                            pass
+                )
+                if taxa_unica_cv is not None and taxa_unica_cv > 0:
+                    taxas_cv_dict["__unica__"] = taxa_unica_cv
             else:
-                st.caption("Carregue o arquivo de dados para listar as amostras." if idioma == "Português" else "Upload a data file to list detected samples.")
+                for idx_c, am_nome in enumerate(amostras_detectadas):
+                    rot_exib = mapa_nomes.get(am_nome, am_nome)
+                    t_c_val = _converter_float(
+                        st.text_input(
+                            f"{rot_exib} (mV/s):",
+                            value="",
+                            placeholder="ex: 10",
+                            key=f"cv_taxa_curva_{am_nome}_{idx_c}",
+                        )
+                    )
+                    if t_c_val is not None and t_c_val > 0:
+                        taxas_cv_dict[am_nome] = t_c_val
+            params["taxas_por_curva"] = taxas_cv_dict
 
             st.markdown("---")
-            exibir_inset_check = st.checkbox(
-                "Exibir Inset (Zoom)" if idioma == "Português" else "Show Inset (Zoom)",
-                False,
-                key="bet_inset_check"
+            params["exibir_balao_cv"] = st.checkbox(
+                "Exibir balão de velocidade no gráfico" if idioma == "Português" else "Show scan rate badge on plot",
+                value=False,
+                key="cv_balao_chk",
             )
-            if exibir_inset_check:
-                st.caption("Posição do Inset no gráfico:" if idioma == "Português" else "Inset Position:")
-                c_ins1, c_ins2 = st.columns(2)
-                ins_x = c_ins1.slider("Posição X", 0.05, 0.65, 0.54, 0.02, key="bet_ins_x")
-                ins_y = c_ins2.slider("Posição Y", 0.05, 0.65, 0.22, 0.02, key="bet_ins_y")
-                inset_bbox_bet = (ins_x, ins_y, 0.38, 0.28)
+            if params["exibir_balao_cv"]:
+                default_txt_balao = ""
+                if "__unica__" in taxas_cv_dict:
+                    v_fmt = f"{taxas_cv_dict['__unica__']:g}".replace(".", ",") if idioma == "Português" else f"{taxas_cv_dict['__unica__']:g}"
+                    default_txt_balao = rf"{v_fmt}\ \mathrm{{mV\ s^{{-1}}}}"
+                params["velocidade"] = st.text_input(
+                    "Texto do balão:" if idioma == "Português" else "Badge text:",
+                    value=default_txt_balao,
+                    key=f"cv_v_{idioma}",
+                )
+                cv_v1, cv_v2 = st.columns(2)
+                params["pos_velocidade"] = (
+                    cv_v1.slider("X Velocidade", 0.0, 0.90, 0.04, 0.02, key="cv_vx"),
+                    cv_v2.slider("Y Velocidade", 0.0, 0.95, 0.93, 0.02, key="cv_vy"),
+                )
+            else:
+                params["velocidade"] = ""
 
-                st.caption("Eixos do Inset (opcional):" if idioma == "Português" else "Inset Axes Limits (optional):")
-                ci_x1, ci_x2 = st.columns(2)
-                ix_min = ci_x1.text_input("Inset X Mín:", "", key="bet_ix_min")
-                ix_max = ci_x2.text_input("Inset X Máx:", "", key="bet_ix_max")
-                ci_y1, ci_y2 = st.columns(2)
-                iy_min = ci_y1.text_input("Inset Y Mín:", "", key="bet_iy_min")
-                iy_max = ci_y2.text_input("Inset Y Máx:", "", key="bet_iy_max")
+            params["exibir_setas"] = st.checkbox("Exibir Carga / Descarga" if idioma == "Português" else "Show Charge / Discharge", True, key="cv_arrows")
+            if params["exibir_setas"]:
+                c1, c2 = st.columns(2)
+                params["pos_carga"] = (c1.slider("X Carga", 0.0, 0.95, 0.35, 0.02, key="cv_cx"), c2.slider("Y Carga", 0.0, 0.95, 0.58, 0.02, key="cv_cy"))
+                c3, c4 = st.columns(2)
+                params["pos_descarga"] = (c3.slider("X Desc.", 0.0, 0.95, 0.65, 0.02, key="cv_dx"), c4.slider("Y Desc.", 0.0, 0.95, 0.38, 0.02, key="cv_dy"))
 
-                inset_limites_bet = {
-                    "xmin": converter_float_seguro(ix_min),
-                    "xmax": converter_float_seguro(ix_max),
-                    "ymin": converter_float_seguro(iy_min),
-                    "ymax": converter_float_seguro(iy_max),
+        elif tecnica_idx == 1:
+            params["aspect_equal"] = st.checkbox("Proporção 1:1 (Aspect Equal)" if idioma == "Português" else "1:1 Aspect Ratio", True, key="eie_aspect_eq")
+            params["exibir_inset"] = st.checkbox("Exibir Inset (Altas Frequências)" if idioma == "Português" else "Show Inset (High Frequencies)", False, key="eie_inset_chk")
+            if params["exibir_inset"]:
+                ci1, ci2 = st.columns(2)
+                ix = ci1.slider("Inset X", 0.05, 0.65, 0.48, 0.02, key="eie_ix")
+                iy = ci2.slider("Inset Y", 0.05, 0.65, 0.42, 0.02, key="eie_iy")
+                params["inset_bbox"] = (ix, iy, 0.44, 0.42)
+                cx1, cx2 = st.columns(2)
+                cy1, cy2 = st.columns(2)
+                params["inset_limites"] = {
+                    "xmin": _converter_float(cx1.text_input("Inset X Mín:", "", key="eie_ixmin")),
+                    "xmax": _converter_float(cx2.text_input("Inset X Máx:", "", key="eie_ixmax")),
+                    "ymin": _converter_float(cy1.text_input("Inset Y Mín:", "", key="eie_iymin")),
+                    "ymax": _converter_float(cy2.text_input("Inset Y Máx:", "", key="eie_iymax")),
+                }
+            params["circuito"] = st.file_uploader("Circuito Equivalente (PNG/JPG)", type=["png", "jpg", "jpeg"], key="circuit_uploader")
+            if params["circuito"] is not None:
+                cc1, cc2 = st.columns(2)
+                params["pos_circuito"] = (cc1.slider("Circuito X", 0.05, 0.95, 0.62, 0.02, key="eie_cx"), cc2.slider("Circuito Y", 0.05, 0.95, 0.78, 0.02, key="eie_cy"))
+                params["zoom_circuito"] = st.slider("Zoom Circuito", 0.15, 0.80, 0.36, 0.02, key="eie_cz")
+
+        elif tecnica_idx == 2:
+            params["exibir_delta_e"] = st.checkbox("Exibir indicador ΔE" if idioma == "Português" else "Show ΔE indicator", True, key="gcd_de_chk")
+            if params["exibir_delta_e"]:
+                params["delta_e_texto"] = st.text_input("Texto ΔE:", value=r"$\Delta E$", key="gcd_de_txt")
+                params["delta_e_x"] = st.slider("Posição X:", 0.05, 0.90, 0.40, 0.01, key="gcd_de_x")
+                cd1, cd2 = st.columns(2)
+                params["delta_e_topo"] = cd1.slider("Topo (Carga):", 0.05, 0.95, 0.58, 0.01, key="gcd_de_top")
+                params["delta_e_base"] = cd2.slider("Base (Descarga):", 0.05, 0.95, 0.46, 0.01, key="gcd_de_bot")
+                params["delta_e_lado"] = st.radio("Lado do texto:", ["Direita / Right", "Esquerda / Left"], horizontal=True, key="gcd_de_side")
+
+        elif tecnica_idx == 3:
+            def_taxas = "0,1 C; 0,2 C; 0,5 C; 1 C; 2 C; 0,1 C" if idioma == "Português" else "0.1 C; 0.2 C; 0.5 C; 1 C; 2 C; 0.1 C"
+            taxas_str = st.text_input(
+                "Rótulos das Zonas (separados por ;):" if idioma == "Português" else "Zone Labels (separated by ;):",
+                value=def_taxas,
+                key=f"rate_z_bat6_{idioma}",
+            )
+            sep = ";" if ";" in taxas_str else ","
+            partes = [t.strip() for t in taxas_str.split(sep) if t.strip()]
+            params["labels_zonas"] = partes if len(partes) >= 1 else None
+
+        elif tecnica_idx == 4:
+            params["rate_tag"] = st.text_input("Tag de Taxa:", textos["cicl_rate"], key=f"cicl_rt_{idioma}")
+            cr1, cr2 = st.columns(2)
+            params["pos_rate"] = (cr1.slider("X Taxa", 0.0, 0.90, 0.04, 0.02, key="cicl_rx"), cr2.slider("Y Taxa", 0.0, 0.95, 0.93, 0.02, key="cicl_ry"))
+
+        elif tecnica_idx == 5:
+            params["rate_tag"] = st.text_input("Tag de Taxa:", textos["cicl_rate"], key=f"ce_rt_{idioma}")
+            cr1, cr2 = st.columns(2)
+            params["pos_rate"] = (cr1.slider("X Taxa", 0.0, 0.90, 0.04, 0.02, key="ce_rx"), cr2.slider("Y Taxa", 0.0, 0.95, 0.78, 0.02, key="ce_ry"))
+            params["nome_amostra"] = st.text_input("Nome da Amostra:", Path(st.session_state.get("nome_arquivo_anterior", "Amostra")).stem, key="ce_nm")
+            params["patamar_ref"] = _converter_float(st.text_input("Patamar de Referência (0 = off):", "0", key="ce_pat")) or 0.0
+
+        elif tecnica_idx == 6:
+            st.caption("⚡ " + ("Densidade de Corrente para Cálculos (A/g)" if idioma == "Português" else "Current Density for Calculations (A/g)"))
+            modo_j_sc2 = st.radio(
+                "Modo de entrada (Densidade I):" if idioma == "Português" else "Current Density input mode:",
+                ["Densidade única (A/g)", "Discriminada por curva"] if idioma == "Português" else ["Single density (A/g)", "Per curve"],
+                horizontal=True,
+                key="sc2e_modo_j_input",
+            )
+            dens_sc2_dict = {}
+            if modo_j_sc2 in ["Densidade única (A/g)", "Single density (A/g)"]:
+                j_unica_val = _converter_float(
+                    st.text_input(
+                        "Densidade de corrente (A/g):" if idioma == "Português" else "Current density (A/g):",
+                        value="",
+                        placeholder="ex: 1,0 (vazio = auto .mpr)",
+                        key="sc2e_j_unica_num",
+                    )
+                )
+                if j_unica_val is not None and j_unica_val > 0:
+                    dens_sc2_dict["__unica__"] = j_unica_val
+            else:
+                for idx_c, am_nome in enumerate(amostras_detectadas):
+                    rot_exib = mapa_nomes.get(am_nome, am_nome)
+                    j_c_val = _converter_float(
+                        st.text_input(
+                            f"{rot_exib} (A/g):",
+                            value="",
+                            placeholder="ex: 1,0",
+                            key=f"sc2e_j_curva_{am_nome}_{idx_c}",
+                        )
+                    )
+                    if j_c_val is not None and j_c_val > 0:
+                        dens_sc2_dict[am_nome] = j_c_val
+            params["densidades_por_curva"] = dens_sc2_dict
+
+            st.markdown("---")
+            params["exibir_densidade_corrente"] = st.checkbox(
+                "Exibir balão de densidade no gráfico" if idioma == "Português" else "Show current density badge on plot",
+                value=False,
+                key="sc2e_j_badge_chk",
+            )
+            if params["exibir_densidade_corrente"]:
+                def_j_txt = r"1\ \mathrm{A\ g^{-1}}"
+                if "__unica__" in dens_sc2_dict:
+                    j_fmt = f"{dens_sc2_dict['__unica__']:g}".replace(".", ",") if idioma == "Português" else f"{dens_sc2_dict['__unica__']:g}"
+                    def_j_txt = rf"{j_fmt}\ \mathrm{{A\ g^{{-1}}}}"
+                params["texto_densidade_corrente"] = st.text_input(
+                    "Texto do balão:" if idioma == "Português" else "Badge text:",
+                    value=def_j_txt,
+                    key="sc2e_j_badge_txt",
+                )
+                cj1, cj2 = st.columns(2)
+                params["pos_densidade_corrente"] = (
+                    cj1.slider("X Balão", 0.0, 0.90, 0.05, 0.02, key="sc2e_jx"),
+                    cj2.slider("Y Balão", 0.0, 0.95, 0.90, 0.02, key="sc2e_jy"),
+                )
+
+        elif tecnica_idx == 7:
+            j_unica_sc3 = _converter_float(
+                st.text_input(
+                    "⚡ Densidade de corrente (A/g) [vazio = auto .mpr]:" if idioma == "Português" else "⚡ Current density (A/g) [blank = auto .mpr]:",
+                    value="",
+                    placeholder="ex: 1,0",
+                    key="sc3e_j_unica_num",
+                )
+            )
+            params["densidades_por_curva"] = {"__unica__": j_unica_sc3} if (j_unica_sc3 is not None and j_unica_sc3 > 0) else {}
+
+            st.markdown("---")
+            params["tag_amostra"] = st.text_input("Identificação da Amostra:" if idioma == "Português" else "Sample Badge:", Path(st.session_state.get("nome_arquivo_anterior", "")).stem, key="sc3_tag")
+            cs1, cs2 = st.columns(2)
+            params["pos_amostra"] = (cs1.slider("X Amostra", 0.0, 0.90, 0.05, 0.02, key="sc3_ax"), cs2.slider("Y Amostra", 0.0, 0.95, 0.90, 0.02, key="sc3_ay"))
+            params["exibir_zero_y2"] = st.checkbox("Linha de referência 0 V (Y2)" if idioma == "Português" else "0 V reference line (Y2)", True, key="sc3_z0")
+
+            params["exibir_densidade_corrente"] = st.checkbox(
+                "Exibir balão de densidade no gráfico" if idioma == "Português" else "Show current density badge on plot",
+                value=False,
+                key="sc3e_j_badge_chk",
+            )
+            if params["exibir_densidade_corrente"]:
+                def_j3_txt = r"1\ \mathrm{A\ g^{-1}}"
+                if j_unica_sc3 is not None and j_unica_sc3 > 0:
+                    j3_fmt = f"{j_unica_sc3:g}".replace(".", ",") if idioma == "Português" else f"{j_unica_sc3:g}"
+                    def_j3_txt = rf"{j3_fmt}\ \mathrm{{A\ g^{{-1}}}}"
+                params["texto_densidade_corrente"] = st.text_input(
+                    "Texto do balão:" if idioma == "Português" else "Badge text:",
+                    value=def_j3_txt,
+                    key="sc3e_j_badge_txt",
+                )
+                cj3_1, cj3_2 = st.columns(2)
+                params["pos_densidade_corrente"] = (
+                    cj3_1.slider("X Densidade", 0.0, 0.90, 0.05, 0.02, key="sc3e_jx"),
+                    cj3_2.slider("Y Densidade", 0.0, 0.95, 0.80, 0.02, key="sc3e_jy"),
+                )
+
+        elif tecnica_idx == 8:
+            areas_bet = {}
+            for amostra in amostras_detectadas:
+                val = _converter_float(st.text_input(f"{amostra} (m²/g):", "", placeholder="ex: 1200", key=f"bet_a_{amostra}"))
+                if val is not None:
+                    areas_bet[amostra] = val
+            params["areas_bet"] = areas_bet
+            params["exibir_inset"] = st.checkbox("Exibir Inset (Zoom)" if idioma == "Português" else "Show Inset (Zoom)", False, key="bet_ins_chk")
+            if params["exibir_inset"]:
+                ci1, ci2 = st.columns(2)
+                params["inset_bbox"] = (ci1.slider("Inset X", 0.05, 0.65, 0.54, 0.02, key="bet_ix"), ci2.slider("Inset Y", 0.05, 0.65, 0.22, 0.02, key="bet_iy"), 0.38, 0.28)
+                cx1, cx2 = st.columns(2)
+                cy1, cy2 = st.columns(2)
+                params["inset_limites"] = {
+                    "xmin": _converter_float(cx1.text_input("Inset X Mín:", "", key="bet_ixmin")),
+                    "xmax": _converter_float(cx2.text_input("Inset X Máx:", "", key="bet_ixmax")),
+                    "ymin": _converter_float(cy1.text_input("Inset Y Mín:", "", key="bet_iymin")),
+                    "ymax": _converter_float(cy2.text_input("Inset Y Máx:", "", key="bet_iymax")),
                 }
 
-    st.title(escolha_tecnica)
+        elif tecnica_idx == 9:
+            params["bode_y1_log"] = st.checkbox(
+                "Eixo Y1 (|Z|) em escala logarítmica" if idioma == "Português" else "Y1 Axis (|Z|) in logarithmic scale",
+                value=True,
+                key="bode_y1_log_chk",
+            )
+            params["exibir_freq_joelho"] = st.checkbox(
+                "Marcar Frequência de Joelho (f₀, Fase = -45°)" if idioma == "Português" else "Mark Knee Frequency (f₀, Phase = -45°)",
+                value=eh_supercap,
+                key=f"bode_f0_chk_{tag_sis}",
+            )
+            if params["exibir_freq_joelho"]:
+                f0_manual_str = st.text_input(
+                    "Frequência de joelho manual em Hz (vazio = auto -45°):" if idioma == "Português" else "Manual knee frequency in Hz (blank = auto -45°):",
+                    value="",
+                    key="bode_f0_manual_input",
+                )
+                params["freq_joelho_manual"] = _converter_float(f0_manual_str)
 
-    # 8. Renderização do Gráfico
+    st.title(f"{sistema_escolhido} — {escolha_tecnica}")
+
+    # 7. Roteamento e Renderização
     if dados_bytes is not None:
         try:
             fig = None
             if tecnica_idx == 0:
-                fig = gerar_plot_cv(
-                    dados_bytes, cv_speed_input, eixo_x_input, eixo_y_label=eixo_y_input,
-                    tag_carga=textos["cv_charge"], tag_descarga=textos["cv_discharge"],
-                    mapa_cores=mapa_cores_curvas, mapa_nomes=mapa_nomes_curvas, mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais, posicao_legenda=posicao_legenda, tema=tema_visual,
-                    idioma=idioma, exibir_setas=exibir_setas_cv, pos_carga=pos_carga_cv, pos_descarga=pos_descarga_cv
+                fig = _chamar_plot_seguro(gerar_plot_cv, 
+                    dados_bytes, params["velocidade"], eixo_x_input, eixo_y_input,
+                    textos["cv_charge"], textos["cv_discharge"], mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
+                    exibir_setas=params["exibir_setas"], pos_carga=params.get("pos_carga", (0.35, 0.58)),
+                    pos_descarga=params.get("pos_descarga", (0.65, 0.38)),
+                    modo_tracado=modo_tracado_selecionado,
+                    pos_velocidade=params.get("pos_velocidade", (0.04, 0.93)),
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 1:
-                fig = gerar_plot_eie(
-                    dados_bytes, circuito_upload, eixo_x_input, eixo_y_input, textos["eie_inset"],
-                    mapa_cores_curvas, mapa_nomes_curvas, mapa_estilos_curvas,
-                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
-                    pos_circuito=pos_circuito_eie, zoom_circuito=zoom_circuito_eie,
-                    exibir_inset=exibir_inset_eie, inset_bbox=inset_bbox_eie, inset_limites=inset_limites_eie,
-                    aspect_equal=aspect_equal_eie, modo_plot=modo_plot_eie
+                fig = _chamar_plot_seguro(gerar_plot_eie, 
+                    dados_bytes, params.get("circuito"), eixo_x_input, eixo_y_input,
+                    mapa_cores, mapa_estilos, mapa_nomes, limites_manuais, posicao_legenda, tema_visual,
+                    idioma=idioma, pos_circuito=params.get("pos_circuito", (0.62, 0.78)),
+                    zoom_circuito=params.get("zoom_circuito", 0.36),
+                    modo_tracado=modo_tracado_selecionado,
+                    aspect_equal=params["aspect_equal"], exibir_inset=params["exibir_inset"],
+                    inset_bbox=params.get("inset_bbox", (0.48, 0.42, 0.44, 0.42)),
+                    inset_limites=params.get("inset_limites"),
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 2:
-                fig = gerar_plot_gcd(
-                    dados_bytes,
-                    eixo_x_label=eixo_x_input,
-                    eixo_y_label=eixo_y_input,
-                    mapa_cores=mapa_cores_curvas,
-                    mapa_nomes=mapa_nomes_curvas,
-                    mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais,
-                    posicao_legenda=posicao_legenda,
-                    tema=tema_visual,
-                    idioma=idioma,
-                    exibir_delta_e=exibir_delta_e_gcd,
-                    delta_e_texto=delta_e_texto_gcd,
-                    delta_e_x_frac=delta_e_x_gcd,
-                    delta_e_y_topo=delta_e_y_topo_gcd,
-                    delta_e_y_base=delta_e_y_base_gcd,
-                    delta_e_lado_texto=delta_e_lado_gcd
+                fig = _chamar_plot_seguro(gerar_plot_gcd, 
+                    dados_bytes, eixo_x_input, eixo_y_input, mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
+                    exibir_delta_e=params["exibir_delta_e"], delta_e_texto=params.get("delta_e_texto", r"$\Delta E$"),
+                    delta_e_x_frac=params.get("delta_e_x", 0.40), delta_e_y_topo=params.get("delta_e_topo", 0.58),
+                    delta_e_y_base=params.get("delta_e_base", 0.46), delta_e_lado_texto=params.get("delta_e_lado", "Direita / Right"),
+                    modo_tracado=modo_tracado_selecionado,
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 3:
-                fig = gerar_plot_rate(
-                    dados_bytes, eixo_x_input, eixo_y_label=eixo_y_input,
-                    mapa_cores=mapa_cores_curvas, mapa_nomes=mapa_nomes_curvas, mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais, posicao_legenda=posicao_legenda, tema=tema_visual, idioma=idioma
+                fig = _chamar_plot_seguro(gerar_plot_rate, 
+                    dados_bytes, eixo_x_input, eixo_y_input, mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
+                    labels_zonas=params.get("labels_zonas"),
+                    modo_tracado=modo_tracado_selecionado,
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 4:
-                fig = gerar_plot_ciclabilidade(
-                    dados_bytes, rate_tag_input, pos_rate_multi, eixo_x_input, eixo_y_input,
-                    mapa_cores_curvas, mapa_nomes_curvas, mapa_estilos_curvas,
-                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma
+                fig = _chamar_plot_seguro(gerar_plot_ciclabilidade, 
+                    dados_bytes, params["rate_tag"], params["pos_rate"], eixo_x_input, eixo_y_input,
+                    mapa_cores, mapa_estilos, mapa_nomes, limites_manuais, posicao_legenda, tema_visual,
+                    idioma=idioma, modo_tracado=modo_tracado_selecionado,
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 5:
-                cor_cap_padrao = "#e2e8f0" if dark_mode_ativo else "#0f172a"
-                cor_eff_padrao = "#38bdf8" if dark_mode_ativo else "#2563eb"
-                cor_cap = mapa_cores_curvas.get("Discharge Capacity", cor_cap_padrao)
-                cor_eff = mapa_cores_curvas.get("Coulombic Efficiency", cor_eff_padrao)
-                est_cap = mapa_estilos_curvas.get("Discharge Capacity", "--")
-                est_eff = mapa_estilos_curvas.get("Coulombic Efficiency", "-")
-                fig = gerar_plot_ciclabilidade_eficiencia(
-                    dados_bytes,
-                    eixo_x_label=eixo_x_input,
-                    eixo_y1_label=eixo_y_input,
-                    eixo_y2_label=eixo_y2_input,
-                    nome_amostra=ce_nome_amostra,
-                    rate_tag=ce_rate_input,
-                    pos_rate=pos_rate_ce,
-                    cor_capacidade=cor_cap,
-                    cor_eficiencia=cor_eff,
-                    estilo_capacidade=est_cap,
-                    estilo_eficiencia=est_eff,
-                    modo_cap=modo_cap_ce,
-                    modo_eff=modo_eff_ce,
-                    limites_manuais=limites_manuais,
-                    patamar_ref=ce_patamar_ref,
-                    tema=tema_visual,
-                    idioma=idioma
+                cor_cap_def = "#e2e8f0" if dark_mode_ativo else "#0f172a"
+                cor_eff_def = "#38bdf8" if dark_mode_ativo else "#2563eb"
+                fig = _chamar_plot_seguro(gerar_plot_ciclabilidade_eficiencia, 
+                    dados_bytes, eixo_x_input, eixo_y_input, eixo_y2_input,
+                    nome_amostra=params["nome_amostra"], rate_tag=params["rate_tag"], pos_rate=params["pos_rate"],
+                    cor_capacidade=mapa_cores.get("Discharge Capacity", cor_cap_def),
+                    cor_eficiencia=mapa_cores.get("Coulombic Efficiency", cor_eff_def),
+                    estilo_capacidade=mapa_estilos.get("Discharge Capacity", "--"),
+                    estilo_eficiencia=mapa_estilos.get("Coulombic Efficiency", "-"),
+                    modo_tracado=modo_tracado_selecionado,
+                    limites_manuais=limites_manuais, patamar_ref=params["patamar_ref"],
+                    tema=tema_visual, idioma=idioma,
                 )
             elif tecnica_idx == 6:
-                fig = gerar_plot_sc_2e_cgcd(
-                    dados_bytes,
-                    eixo_x_label=eixo_x_input,
-                    eixo_y_label=eixo_y_input,
-                    mapa_cores=mapa_cores_curvas,
-                    mapa_nomes=mapa_nomes_curvas,
-                    mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais,
-                    posicao_legenda=posicao_legenda,
-                    tema=tema_visual,
-                    idioma=idioma,
-                    exibir_ir_drop=exibir_ir_sc,
-                    ir_texto=ir_texto_sc,
-                    ir_x_frac=ir_x_sc,
-                    ir_y_topo=ir_y_topo_sc,
-                    ir_y_base=ir_y_base_sc
+                sig_sc2 = inspect.signature(gerar_plot_sc_2e).parameters
+                kwargs_sc2 = {"idioma": idioma, "modo_tracado": modo_tracado_selecionado, "legenda_horizontal": legenda_horizontal}
+                if "exibir_densidade_corrente" in sig_sc2 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_sc2.values()):
+                    kwargs_sc2["exibir_densidade_corrente"] = params.get("exibir_densidade_corrente", False)
+                    kwargs_sc2["texto_densidade_corrente"] = params.get("texto_densidade_corrente", r"1\ \mathrm{A\ g^{-1}}")
+                    kwargs_sc2["pos_densidade_corrente"] = params.get("pos_densidade_corrente", (0.05, 0.90))
+                fig = _chamar_plot_seguro(gerar_plot_sc_2e, 
+                    dados_bytes, eixo_x_input, eixo_y_input, mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, **kwargs_sc2,
                 )
             elif tecnica_idx == 7:
-                fig = gerar_plot_sc_3e_cgcd(
-                    dados_bytes,
-                    eixo_x_label=eixo_x_input,
-                    eixo_y1_label=eixo_y_input,
-                    eixo_y2_label=eixo_y2_input,
-                    mapa_cores=mapa_cores_curvas,
-                    mapa_nomes=mapa_nomes_curvas,
-                    mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais,
-                    posicao_legenda=posicao_legenda,
-                    tema=tema_visual,
-                    idioma=idioma,
-                    exibir_linha_zero=exibir_zero_3e,
-                    nome_amostra_3e=nome_amostra_3e,
-                    pos_amostra_3e=pos_amostra_3e
+                sig_sc3 = inspect.signature(gerar_plot_sc_3e).parameters
+                kwargs_sc3 = {
+                    "idioma": idioma,
+                    "tag_amostra": params["tag_amostra"],
+                    "pos_amostra": params["pos_amostra"],
+                    "exibir_zero_y2": params["exibir_zero_y2"],
+                    "modo_tracado": modo_tracado_selecionado,
+                    "legenda_horizontal": legenda_horizontal,
+                }
+                if "exibir_densidade_corrente" in sig_sc3 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_sc3.values()):
+                    kwargs_sc3["exibir_densidade_corrente"] = params.get("exibir_densidade_corrente", False)
+                    kwargs_sc3["texto_densidade_corrente"] = params.get("texto_densidade_corrente", r"1\ \mathrm{A\ g^{-1}}")
+                    kwargs_sc3["pos_densidade_corrente"] = params.get("pos_densidade_corrente", (0.05, 0.80))
+                fig = _chamar_plot_seguro(gerar_plot_sc_3e, 
+                    dados_bytes, eixo_x_input, eixo_y_input, eixo_y2_input, mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, **kwargs_sc3,
                 )
             elif tecnica_idx == 8:
-                fig = gerar_plot_sc_rate(
-                    dados_bytes,
-                    eixo_x_label=eixo_x_input,
-                    eixo_y_label=eixo_y_input,
-                    mapa_cores=mapa_cores_curvas,
-                    mapa_nomes=mapa_nomes_curvas,
-                    mapa_estilos=mapa_estilos_curvas,
-                    limites_manuais=limites_manuais,
-                    posicao_legenda=posicao_legenda,
-                    tema=tema_visual,
-                    idioma=idioma,
-                    protocolo_correntes=protocolo_sc_rate,
-                    ciclos_por_degrau=ciclos_por_degrau_sc
+                titulo_leg = textos["bet_legenda_area"] if params.get("areas_bet") else textos["bet_legenda"]
+                fig = _chamar_plot_seguro(gerar_plot_bet, 
+                    dados_bytes, eixo_x_input, eixo_y_input, textos["bet_ads"], textos["bet_des"],
+                    titulo_leg, textos["bet_inset"], mapa_cores, mapa_estilos, mapa_nomes,
+                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
+                    areas_bet=params.get("areas_bet"), exibir_inset=params["exibir_inset"],
+                    inset_bbox=params.get("inset_bbox", (0.54, 0.22, 0.38, 0.28)),
+                    inset_limites=params.get("inset_limites"),
+                    modo_tracado=modo_tracado_selecionado,
+                    legenda_horizontal=legenda_horizontal,
                 )
             elif tecnica_idx == 9:
-                titulo_legenda = textos["bet_legenda_area"] if areas_bet_dict else textos["bet_legenda"]
-                fig = gerar_plot_bet(
-                    dados_bytes, eixo_x_input, eixo_y_input,
-                    textos["bet_ads"], textos["bet_des"], titulo_legenda,
-                    textos["bet_inset"], mapa_cores_curvas, mapa_nomes_curvas, mapa_estilos_curvas,
-                    limites_manuais, posicao_legenda, tema_visual, idioma=idioma,
-                    areas_bet=areas_bet_dict, exibir_inset=exibir_inset_check,
-                    inset_bbox=inset_bbox_bet, inset_limites=inset_limites_bet
+                fig = _chamar_plot_seguro(gerar_plot_bode, 
+                    dados_bytes, eixo_x_input, eixo_y_input, eixo_y2_input,
+                    mapa_cores, mapa_estilos, mapa_nomes, limites_manuais, posicao_legenda, tema_visual,
+                    idioma=idioma, modo_tracado=modo_tracado_selecionado,
+                    y1_log=params.get("bode_y1_log", True),
+                    exibir_freq_joelho=params.get("exibir_freq_joelho", eh_supercap),
+                    freq_joelho_manual=params.get("freq_joelho_manual"),
+                    legenda_horizontal=legenda_horizontal,
                 )
 
             if fig is not None:
                 st.pyplot(fig)
 
-                col1, col2 = st.columns(2)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                if modo_mpr_ativo:
+                    col1, col2, col3 = st.columns(3)
+                else:
+                    col1, col2 = st.columns(2)
 
                 buf_png = io.BytesIO()
                 fig.savefig(buf_png, format="png", dpi=300, bbox_inches="tight", facecolor=fig.get_facecolor())
                 col1.download_button(
                     label="📥 Baixar PNG (300 DPI)" if idioma == "Português" else "📥 Download PNG (300 DPI)",
-                    data=buf_png.getvalue(),
-                    file_name=f"grafico_{timestamp}.png",
-                    mime="image/png",
+                    data=buf_png.getvalue(), file_name=f"grafico_{timestamp}.png", mime="image/png",
                 )
 
                 buf_svg = io.BytesIO()
                 fig.savefig(buf_svg, format="svg", bbox_inches="tight", facecolor=fig.get_facecolor())
                 col2.download_button(
                     label="📥 Baixar SVG (Vetorial)" if idioma == "Português" else "📥 Download SVG (Vector)",
-                    data=buf_svg.getvalue(),
-                    file_name=f"grafico_{timestamp}.svg",
-                    mime="image/svg+xml",
+                    data=buf_svg.getvalue(), file_name=f"grafico_{timestamp}.svg", mime="image/svg+xml",
                 )
+
+                if modo_mpr_ativo:
+                    massa_mg = st.session_state.get("mpr_massa_ativa_mg", 1.0)
+                    txt_conteudo = exportar_txt_compativel_mpr(arquivos_lista, tecnica_idx, massa_mg=massa_mg, idioma=idioma)
+                    col3.download_button(
+                        label="📄 Exportar Dados (.txt)" if idioma == "Português" else "📄 Export Data (.txt)",
+                        data=txt_conteudo.encode("utf-8"),
+                        file_name=f"dados_{tag_tec}_{timestamp}.txt",
+                        mime="text/plain",
+                    )
+
+                # Painel de Cálculo Automático de Parâmetros Eletroquímicos
+                massa_atual_mg = st.session_state.get("mpr_massa_ativa_mg", 1.0)
+                df_metricas = calcular_resumo_parametros(
+                    dados_bytes,
+                    tecnica_idx=tecnica_idx,
+                    mapa_nomes=mapa_nomes,
+                    massa_mg=massa_atual_mg,
+                    eh_supercap=eh_supercap,
+                    params=params,
+                )
+                if df_metricas is not None and not df_metricas.empty:
+                    st.markdown("---")
+                    st.subheader("📊 " + ("Parâmetros Calculados Automaticamente" if idioma == "Português" else "Automatically Calculated Parameters"))
+                    st.dataframe(df_metricas, use_container_width=True, hide_index=True)
+
+                    sep_csv = ";" if idioma == "Português" else ","
+                    dec_csv = "," if idioma == "Português" else "."
+                    csv_bytes = df_metricas.to_csv(index=False, sep=sep_csv, decimal=dec_csv).encode("utf-8-sig")
+                    st.download_button(
+                        label="📥 Baixar Tabela de Parâmetros (.csv)" if idioma == "Português" else "📥 Download Parameters Table (.csv)",
+                        data=csv_bytes,
+                        file_name=f"parametros_{tag_tec}_{timestamp}.csv",
+                        mime="text/csv",
+                        key=f"dl_metrics_{tag_tec}_{timestamp}",
+                    )
 
         except Exception as e:
             st.error(f"Erro ao processar arquivo: {e}" if idioma == "Português" else f"Error processing file: {e}")
     else:
-        st.info("👈 Carregue um arquivo no topo da barra lateral para gerar o gráfico correspondente." if idioma == "Português" else "👈 Upload a file at the top of the sidebar to generate the plot.")
+        st.info("👈 Carregue um ou mais arquivos no topo da barra lateral para gerar o gráfico correspondente." if idioma == "Português" else "👈 Upload one or more files at the top of the sidebar to generate the plot.")
 
 
 if __name__ == "__main__":
