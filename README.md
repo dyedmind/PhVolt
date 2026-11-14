@@ -1,4 +1,4 @@
-# PhVolt
+# PhVolt v2.3
 Creating eletrochemistry graphs 
 
 # ⚡ PhVolt — Análise Eletroquímica e Caracterização Automatizada
