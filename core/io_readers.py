@@ -1,3 +1,4 @@
+import io
 import gc
 import os
 from pathlib import Path
@@ -177,10 +178,12 @@ def _remover_repouso_inicial_mpr(df):
     return df
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def _ler_mpr_para_dataframe(dados_bytes):
     """
     Usa o leitor oficial BioLogic.MPRfile do galvani (com fallback para v11+)
     e remove qualquer tempo morto/OCV inicial antes do começo real do Ciclo 1.
+    Cacheado por hash de bytes para evitar I/O repetido e bloqueios em reruns rápidos.
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".mpr")
     try:
@@ -332,15 +335,22 @@ def _obter_serie_ciclos(df):
 def listar_ciclos_disponiveis_mpr(lista_arquivos_mpr):
     info = {}
     for arq in lista_arquivos_mpr:
-        if not arq["nome"].lower().endswith(".mpr"):
-            continue
-        try:
-            df_i = _ler_mpr_para_dataframe(arq["bytes"])
-            s_cic = _obter_serie_ciclos(df_i)
-            ciclos_unicos = sorted(int(x) for x in s_cic.dropna().unique())
-            info[Path(arq["nome"]).stem] = ciclos_unicos if ciclos_unicos else [1]
-        except Exception:
-            info[Path(arq["nome"]).stem] = [1]
+        nome_stem = Path(arq["nome"]).stem
+        if arq["nome"].lower().endswith(".mpr"):
+            try:
+                df_i = _ler_mpr_para_dataframe(arq["bytes"])
+                s_cic = _obter_serie_ciclos(df_i)
+                ciclos_unicos = sorted(int(x) for x in s_cic.dropna().unique())
+                info[nome_stem] = ciclos_unicos if ciclos_unicos else [1]
+            except Exception:
+                info[nome_stem] = [1]
+        elif _eh_arquivo_ciclador_chines(arq["bytes"]):
+            try:
+                incluir_c1 = bool(st.session_state.get("chines_incluir_primeiro_ciclo", False))
+                ciclos_reais, _, _ = _obter_ciclos_filtrados_ciclador_chines(arq["bytes"], incluir_primeiro_ciclo=incluir_c1)
+                info[nome_stem] = [c["ciclo"] for c in ciclos_reais] if ciclos_reais else [1]
+            except Exception:
+                info[nome_stem] = [1]
     return info
 
 
@@ -670,6 +680,33 @@ def _consolidar_rate_mpr(lista_arquivos_mpr, massa_mg):
     return pd.concat(series_pareadas, axis=1), tokens_pareados
 
 
+def _calcular_energia_ciclo_mpr(sub_df, col_v, col_i, col_t, col_q):
+    """Calcula a energia integrada (mWh) de um ramo (carga ou descarga) a partir de V, I, t ou Q."""
+    if sub_df is None or len(sub_df) < 2 or col_v is None or col_v not in sub_df.columns:
+        return 0.0
+    v_arr = sub_df[col_v].to_numpy(float)
+    mask_v = np.isfinite(v_arr)
+    if np.sum(mask_v) < 2:
+        return 0.0
+    trapz_fn = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
+    if col_t and col_t in sub_df.columns and col_i and col_i in sub_df.columns:
+        t_arr = sub_df[col_t].to_numpy(float)
+        i_arr = np.abs(sub_df[col_i].to_numpy(float))
+        m = np.isfinite(v_arr) & np.isfinite(t_arr) & np.isfinite(i_arr)
+        if np.sum(m) >= 2:
+            return abs(float(trapz_fn(v_arr[m] * i_arr[m], t_arr[m]))) / 3600.0
+
+    if col_q and col_q in sub_df.columns:
+        q_arr = np.abs(sub_df[col_q].to_numpy(float))
+        m = np.isfinite(v_arr) & np.isfinite(q_arr)
+        if np.sum(m) >= 2:
+            q_mah = q_arr[m] / 3.6 if ("/C" in col_q and "mA.h" not in col_q) else q_arr[m]
+            return abs(float(trapz_fn(v_arr[m], q_mah)))
+
+    return 0.0
+
+
 def _extrair_ciclabilidade_mpr(df_raw, massa_mg):
     cols = [str(c) for c in df_raw.columns]
     col_ewe = next((c for c in cols if "Ewe" in c), None)
@@ -694,8 +731,12 @@ def _extrair_ciclabilidade_mpr(df_raw, massa_mg):
             if not chg.empty:
                 q_c = np.abs(chg[col_q].to_numpy(float))
                 q_chg_total = np.nanmax(q_c) - np.nanmin(q_c)
+                if "/C" in col_q and "mA.h" not in col_q:
+                    q_chg_total /= 3.6
             q_d = np.abs(dchg[col_q].to_numpy(float))
             q_dchg_total = np.nanmax(q_d) - np.nanmin(q_d)
+            if "/C" in col_q and "mA.h" not in col_q:
+                q_dchg_total /= 3.6
         elif col_i and col_t:
             if not chg.empty:
                 dt_c = np.diff(chg[col_t].to_numpy(float), prepend=chg[col_t].to_numpy(float)[0]) / 3600.0
@@ -706,6 +747,10 @@ def _extrair_ciclabilidade_mpr(df_raw, massa_mg):
         cap_dchg_esp = q_dchg_total / massa_g
         eficiencia = (q_dchg_total / q_chg_total * 100.0) if q_chg_total > 0 else 100.0
 
+        e_chg_mwh = _calcular_energia_ciclo_mpr(chg, col_ewe, col_i, col_t, col_q)
+        e_dchg_mwh = _calcular_energia_ciclo_mpr(dchg, col_ewe, col_i, col_t, col_q)
+        eficiencia_energetica = (e_dchg_mwh / e_chg_mwh * 100.0) if e_chg_mwh > 1e-9 else np.nan
+
         if eficiencia > 120.0 or cap_dchg_esp <= 0:
             continue
 
@@ -713,10 +758,105 @@ def _extrair_ciclabilidade_mpr(df_raw, massa_mg):
             "Ciclo": int(ciclo_id),
             "Cap_Descarga": cap_dchg_esp,
             "Eficiencia": eficiencia,
+            "Eficiencia_Energetica": eficiencia_energetica if (np.isfinite(eficiencia_energetica) and 0 < eficiencia_energetica <= 120.0) else np.nan,
         })
 
     df_out = pd.DataFrame(registros)
-    return df_out, ["Ciclo", "Cap_Descarga", "Eficiencia"]
+    return df_out, ["Ciclo", "Cap_Descarga", "Eficiencia", "Eficiencia_Energetica"]
+
+
+def _extrair_ciclabilidade_sc_mpr(df_raw, massa_mg):
+    """
+    Extrai Ciclo, Capacitância Específica de Descarga (F/g), Eficiência Coulômbica (%)
+    e Eficiência Energética (%) ciclo a ciclo para Supercapacitores (.mpr).
+    """
+    cols = [str(c) for c in df_raw.columns]
+    col_i = _encontrar_coluna_corrente(cols)
+    col_t = next((c for c in cols if "time" in c.lower() and "step" not in c.lower()), None) or next((c for c in cols if "time" in c.lower()), None)
+    col_q = next((c for c in cols if "Q charge/discharge" in c or "(Q-Qo)" in c), None)
+    col_hc = next((c for c in cols if "half cycle" in c.lower()), None)
+    col_oxred = next((c for c in cols if "ox/red" in c.lower()), None)
+
+    v_celula = _obter_potencial_celula_ou_ewe(df_raw)
+    if v_celula is None or col_t is None:
+        return pd.DataFrame(), ["Ciclo", "Cap_Descarga", "Eficiencia", "Eficiencia_Energetica"]
+
+    massa_g = max(massa_mg, 1e-6) / 1000.0
+    df = df_raw.copy()
+    df["_v_cell"] = v_celula
+    df["_ciclo"] = _obter_serie_ciclos(df)
+    trapz_fn = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
+    registros = []
+    for ciclo_id, grupo in df.groupby("_ciclo", sort=True):
+        chg, dchg = _identificar_carga_descarga_grupo(grupo, "_v_cell", col_i, col_hc, col_oxred)
+        if dchg.empty or len(dchg) < 3:
+            continue
+
+        t_d = dchg[col_t].to_numpy(float)
+        v_d = dchg["_v_cell"].to_numpy(float)
+        m_d = np.isfinite(t_d) & np.isfinite(v_d)
+        t_d, v_d = t_d[m_d], v_d[m_d]
+        if len(t_d) < 3:
+            continue
+
+        dt_d = float(max(1e-6, t_d[-1] - t_d[0]))
+        i_dchg_amp = 0.0
+        if col_i and col_i in dchg.columns:
+            ic_arr = np.abs(dchg[col_i].to_numpy(float))
+            ic_at = ic_arr[np.isfinite(ic_arr) & (ic_arr > 1e-6)]
+            if len(ic_at) > 0:
+                i_dchg_amp = float(np.median(ic_at)) / 1000.0
+        if i_dchg_amp <= 1e-7 and col_q and col_q in dchg.columns:
+            q_d = np.abs(dchg[col_q].to_numpy(float))
+            dq = float(np.nanmax(q_d) - np.nanmin(q_d))
+            q_coulombs = dq if ("/C" in col_q and "mA.h" not in col_q) else (dq * 3.6)
+            i_dchg_amp = q_coulombs / dt_d
+
+        if i_dchg_amp <= 1e-7:
+            continue
+
+        v_ini = float(v_d[0])
+        v_fim = float(v_d[-1])
+        v_ref_min = max(0.0, v_fim) if v_fim >= -0.02 else v_fim
+        dv_ef = max(v_ini - v_ref_min, 1e-3)
+        int_v_dt = abs(float(trapz_fn(np.maximum(0.0, v_d - v_ref_min), t_d)))
+        c_sp_fg = (2.0 * i_dchg_amp * int_v_dt) / (massa_g * (dv_ef ** 2))
+        if not np.isfinite(c_sp_fg) or c_sp_fg <= 0:
+            continue
+
+        q_dchg_c = i_dchg_amp * dt_d
+        q_chg_c = 0.0
+        if not chg.empty and len(chg) >= 2:
+            t_c = chg[col_t].to_numpy(float)
+            dt_c = float(max(0.0, t_c[-1] - t_c[0]))
+            i_chg_amp = i_dchg_amp
+            if col_i and col_i in chg.columns:
+                ic_c = np.abs(chg[col_i].to_numpy(float))
+                ic_c_at = ic_c[np.isfinite(ic_c) & (ic_c > 1e-6)]
+                if len(ic_c_at) > 0:
+                    i_chg_amp = float(np.median(ic_c_at)) / 1000.0
+            q_chg_c = i_chg_amp * dt_c
+
+        eff_coul = (q_dchg_c / q_chg_c * 100.0) if q_chg_c > 1e-9 else 100.0
+        if eff_coul > 120.0:
+            continue
+
+        e_chg_mwh = _calcular_energia_ciclo_mpr(chg, "_v_cell", col_i, col_t, col_q)
+        e_dchg_mwh = _calcular_energia_ciclo_mpr(dchg, "_v_cell", col_i, col_t, col_q)
+        eff_energ = (e_dchg_mwh / e_chg_mwh * 100.0) if e_chg_mwh > 1e-9 else np.nan
+
+        registros.append({
+            "Ciclo": int(ciclo_id),
+            "Cap_Descarga": float(c_sp_fg),
+            "Eficiencia": float(eff_coul),
+            "Eficiencia_Energetica": float(eff_energ) if (np.isfinite(eff_energ) and 0 < eff_energ <= 120.0) else np.nan,
+        })
+
+    df_out = pd.DataFrame(registros)
+    if not df_out.empty:
+        df_out["Ciclo"] = np.arange(1, len(df_out) + 1, dtype=int)
+    return df_out, ["Ciclo", "Cap_Descarga", "Eficiencia", "Eficiencia_Energetica"]
 
 
 def _extrair_sc_2e_mpr_multi(lista_arquivos_mpr, mapa_ciclos_usuario=None):
@@ -881,7 +1021,7 @@ def consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0):
     col_t = next((c for c in cols if "time" in c.lower() and "step" not in c.lower()), None) or next((c for c in cols if "time" in c.lower()), None)
 
     # (3) GCD Bateria (1 ou múltiplos arquivos .mpr)
-    if tecnica_idx == 2:
+    if tecnica_idx in [2, 10]:
         df_out, tokens, ciclos_mpr = _extrair_gcd_mpr_multi(lista_arquivos_mpr, massa_mg, mapa_ciclos_usuario)
         st.session_state["_ciclos_gcd_mpr_cache"] = ciclos_mpr
         return df_out, tokens
@@ -896,8 +1036,12 @@ def consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0):
     if tecnica_idx == 5:
         return _extrair_ciclabilidade_mpr(df_primeiro, massa_mg)
 
+    # (15) Ciclabilidade & Eficiência Individual (Supercapacitor)
+    if tecnica_idx == 15:
+        return _extrair_ciclabilidade_sc_mpr(df_primeiro, massa_mg)
+
     # (7) CGCD Supercapacitor (2 Eletrodos / Janelas - usa Ecell = Ewe - Ece)
-    if tecnica_idx == 6:
+    if tecnica_idx in [6, 12, 13]:
         return _extrair_sc_2e_mpr_multi(lista_arquivos_mpr, mapa_ciclos_usuario)
 
     # (8) CGCD Supercapacitor (3 Eletrodos: Ecell, Ewe, Ece)
@@ -930,8 +1074,8 @@ def consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0):
         }).dropna()
         return df_out, ["time/s", "Ecell/V", "Ewe/V", "Ece/V"]
 
-    # (10) EIE - Bode (|Z|, Freq, Fase)
-    if tecnica_idx == 9:
+    # (10) EIE - Bode (|Z|, Freq, Fase) e (16) Bode Capacitância Diferencial SC
+    if tecnica_idx in [9, 16]:
         df_bode, tokens_bode = _extrair_bode_mpr_multi(lista_arquivos_mpr, mapa_ciclos_usuario)
         if not df_bode.empty:
             return df_bode, tokens_bode
@@ -945,7 +1089,7 @@ def consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0):
         c_i = [str(c) for c in df_i.columns]
         ciclos_amostra = mapa_ciclos_usuario.get(nome_amostra)
 
-        if tecnica_idx == 0:
+        if tecnica_idx in [0, 11]:
             cx = next((c for c in c_i if "Ewe" in c), None)
             cy = _encontrar_coluna_corrente(c_i)
             if cx and cy:
@@ -977,19 +1121,36 @@ def consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0):
                 series_pareadas.extend([df_cic["Ciclo"], df_cic["Valor"]])
                 tokens_pareados.extend(["Ciclo", nome_amostra])
 
+        elif tecnica_idx == 14:
+            df_cic_sc, _ = _extrair_ciclabilidade_sc_mpr(df_i, massa_mg)
+            if not df_cic_sc.empty:
+                series_pareadas.extend([df_cic_sc["Ciclo"], df_cic_sc["Cap_Descarga"]])
+                tokens_pareados.extend(["Ciclo", nome_amostra])
+
     if series_pareadas:
         return pd.concat(series_pareadas, axis=1), tokens_pareados
 
     raise ValueError("Não foi possível extrair a curva para esta técnica a partir do arquivo .mpr selecionado.")
 
 
-def exportar_txt_compativel_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0, idioma="Português"):
+def exportar_txt_compativel_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0, idioma="Português", fonte_dados=None):
     """
     Gera o conteúdo de um arquivo .txt delimitado por tabulação (padrão Origin/PhVolt)
-    contendo exatamente as curvas extraídas para a técnica selecionada a partir dos arquivos .mpr.
+    contendo exatamente as curvas extraídas/unificadas para a técnica selecionada em TODOS os cenários
+    (.mpr, múltiplos .txt/.dat/.csv unificados, ciclador chinês simplificado ou arquivo único).
     """
-    df_out, tokens = consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg)
-    if df_out.empty:
+    if lista_arquivos_mpr:
+        primeiro_nome = lista_arquivos_mpr[0]["nome"].lower()
+        if primeiro_nome.endswith(".mpr"):
+            df_out, tokens = consolidar_arquivos_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg)
+        else:
+            df_out, tokens = processar_cabecalho_e_dados(lista_arquivos_mpr[0]["bytes"])
+    elif fonte_dados is not None:
+        df_out, tokens = processar_cabecalho_e_dados(fonte_dados)
+    else:
+        raise ValueError("Não há dados carregados para exportar.")
+
+    if df_out is None or df_out.empty:
         raise ValueError("Não há dados extraídos para exportar.")
 
     num_cols = df_out.shape[1]
@@ -1000,7 +1161,6 @@ def exportar_txt_compativel_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0, i
 
     linhas_txt = ["\t".join(cabecalho)]
 
-    # Formata linha a linha com tabulação, deixando células vazias onde houver NaN (separador de ciclos ou tamanhos diferentes)
     matriz = df_out.to_numpy(dtype=float)
     for row in matriz:
         celulas = []
@@ -1017,31 +1177,41 @@ def exportar_txt_compativel_mpr(lista_arquivos_mpr, tecnica_idx, massa_mg=1.0, i
     return "\n".join(linhas_txt) + "\n"
 
 
+def _decodificar_bytes_texto(raw_bytes):
+    if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw_bytes.decode("utf-16", errors="ignore")
+    # Verifica presença de bytes nulos típicos de UTF-16 sem BOM
+    if b"\x00" in raw_bytes[:200]:
+        for enc in ["utf-16-le", "utf-16-be"]:
+            try:
+                return raw_bytes.decode(enc)
+            except Exception:
+                pass
+    for enc in ["utf-8-sig", "utf-8", "latin1"]:
+        try:
+            return raw_bytes.decode(enc)
+        except Exception:
+            pass
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
 def extrair_linhas_arquivo(fonte_dados):
     if hasattr(fonte_dados, "getvalue"):
-        linhas = [
-            l.decode("utf-8", errors="ignore").rstrip("\r\n")
-            for l in fonte_dados.getvalue().splitlines()
-        ]
+        texto = _decodificar_bytes_texto(fonte_dados.getvalue())
     elif isinstance(fonte_dados, (bytes, bytearray)):
-        linhas = [
-            l.decode("utf-8", errors="ignore").rstrip("\r\n")
-            for l in fonte_dados.splitlines()
-        ]
+        texto = _decodificar_bytes_texto(bytes(fonte_dados))
     else:
-        with open(fonte_dados, "r", encoding="utf-8", errors="ignore") as f:
-            linhas = [l.rstrip("\r\n") for l in f]
-    return [l for l in linhas if l.strip()]
+        with open(fonte_dados, "rb") as f:
+            texto = _decodificar_bytes_texto(f.read())
+    return [l.rstrip("\r\n") for l in texto.splitlines() if l.strip()]
 
 
-def processar_cabecalho_e_dados(fonte_dados):
-    arquivos_mpr = st.session_state.get("arquivos_mpr_lista", [])
-    if arquivos_mpr and arquivos_mpr[0]["nome"].lower().endswith(".mpr"):
-        tecnica_atual = st.session_state.get("tecnica_idx", 0)
-        massa_mg = st.session_state.get("mpr_massa_ativa_mg", 1.0)
-        return consolidar_arquivos_mpr(arquivos_mpr, tecnica_atual, massa_mg)
-
+@st.cache_data(show_spinner=False, max_entries=32)
+def _parse_arquivo_texto_unico(fonte_dados):
     linhas = extrair_linhas_arquivo(fonte_dados)
+    if not linhas:
+        return pd.DataFrame(), []
+
     idx_primeiro_dado = 0
     idx_long_name, idx_comments = None, None
 
@@ -1083,7 +1253,7 @@ def processar_cabecalho_e_dados(fonte_dados):
 
     descartes = [
         "LONG NAME", "LONGNAME", "COMMENTS", "COMMENT", "UNITS", "UNIT", "AXIS", "",
-        "PRESSÃO RELATIVA", "RELATIVE PRESSURE", "QUANTIDADE ADSORVIDA", "QUANTITY ADSORBED"
+        "PRESSÃO RELATIVA", "RELATIVE PRESSURE", "QUANTIDADE ADSORVIDA", "QUANTITY ADSORVIDA"
     ]
     tokens_limpos = [
         t for t in tokens
@@ -1116,9 +1286,420 @@ def processar_cabecalho_e_dados(fonte_dados):
     return pd.DataFrame(matriz), tokens_limpos
 
 
+
+
+def _eh_arquivo_ciclador_chines(fonte_dados):
+    """Detecta se o arquivo .txt possui o cabeçalho tabular bruto do ciclador (Step Type, Current(A), Voltage(V), Chg. Spec. Cap.)."""
+    try:
+        if hasattr(fonte_dados, "getvalue"):
+            head_bytes = fonte_dados.getvalue()[:600]
+        elif isinstance(fonte_dados, (bytes, bytearray)):
+            head_bytes = bytes(fonte_dados[:600])
+        else:
+            with open(fonte_dados, "rb") as f:
+                head_bytes = f.read(600)
+        head_txt = _decodificar_bytes_texto(head_bytes)
+        primeira_linha = head_txt.splitlines()[0] if head_txt.splitlines() else ""
+        return ("Step Type" in primeira_linha) and ("Voltage(V)" in primeira_linha) and ("Current(A)" in primeira_linha)
+    except Exception:
+        return False
+
+
+def _total_time_para_segundos(serie_tempo):
+    """Converte strings 'HH:MM:SS' (incluindo horas > 24, ex: '125:40:10') para segundos."""
+    s = serie_tempo.astype(str).str.strip()
+    partes = s.str.split(":", expand=True)
+    if partes.shape[1] >= 3:
+        h = pd.to_numeric(partes[0], errors="coerce").fillna(0.0).to_numpy(float)
+        m = pd.to_numeric(partes[1], errors="coerce").fillna(0.0).to_numpy(float)
+        sec = pd.to_numeric(partes[2], errors="coerce").fillna(0.0).to_numpy(float)
+        return h * 3600.0 + m * 60.0 + sec
+    return pd.to_numeric(s, errors="coerce").fillna(0.0).to_numpy(float)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _parsear_ciclador_chines_bruto(dados_bytes):
+    """
+    Decifra o arquivo bruto do ciclador chinês (UTF-16 / UTF-8) e corrige o bug
+    em que o firmware sobrepõe o último ciclo de uma densidade de corrente com o
+    primeiro ciclo da próxima densidade dentro do mesmo `Cycle Index`.
+
+    Retorna uma lista de dicionários (1 por ciclo real cronológico) e as zonas
+    de densidade de corrente detectadas automaticamente.
+    """
+    texto = _decodificar_bytes_texto(dados_bytes)
+    df = pd.read_csv(io.StringIO(texto), sep="\t")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_step = next((c for c in df.columns if "step type" in c.lower()), None)
+    col_i = next((c for c in df.columns if "current" in c.lower()), None)
+    col_v = next((c for c in df.columns if "voltage" in c.lower()), None)
+    col_t = next((c for c in df.columns if "total time" in c.lower() or "time" in c.lower()), None)
+    col_qchg = next((c for c in df.columns if "chg" in c.lower() and "dchg" not in c.lower() and "cap" in c.lower()), None)
+    col_qdchg = next((c for c in df.columns if "dchg" in c.lower() and "cap" in c.lower()), None)
+
+    if not (col_step and col_i and col_v and col_qchg and col_qdchg):
+        return [], []
+
+    # Mantém apenas passos ativos (ignora 'Rest' onde o ciclador pausa entre patamares de corrente)
+    step_str = df[col_step].astype(str).str.strip()
+    mask_ativo = step_str.str.contains("Chg|DChg", case=False, regex=True)
+    df_act = df[mask_ativo].copy()
+    if df_act.empty:
+        return [], []
+
+    step_clean = df_act[col_step].astype(str).str.strip()
+    eh_dchg = step_clean.str.contains("DChg", case=False)
+    tipo_ramo = np.where(eh_dchg, "DChg", "Chg")
+
+    # Cada bloco contíguo de Chg ou DChg é separado cronologicamente
+    bloco_id = (pd.Series(tipo_ramo, index=df_act.index) != pd.Series(tipo_ramo, index=df_act.index).shift()).cumsum()
+
+    t_sec_all = _total_time_para_segundos(df_act[col_t]) if col_t else np.arange(len(df_act), dtype=float)
+    df_act["_t_sec"] = t_sec_all
+    df_act["_tipo"] = tipo_ramo
+    df_act["_bloco"] = bloco_id
+
+    blocos = []
+    for _, bdf in df_act.groupby("_bloco", sort=True):
+        t_b = bdf["_tipo"].iloc[0]
+        i_med = float(np.nanmedian(np.abs(pd.to_numeric(bdf[col_i], errors="coerce").to_numpy(float))))
+        v_arr = pd.to_numeric(bdf[col_v], errors="coerce").to_numpy(float)
+        t_arr = bdf["_t_sec"].to_numpy(float)
+        q_col = col_qdchg if t_b == "DChg" else col_qchg
+        q_arr = pd.to_numeric(bdf[q_col], errors="coerce").to_numpy(float)
+
+        m_val = np.isfinite(v_arr) & np.isfinite(q_arr)
+        v_arr = v_arr[m_val]
+        q_arr = q_arr[m_val]
+        t_arr = t_arr[m_val]
+        if len(v_arr) < 2:
+            continue
+
+        # Garante que a capacidade do ramo comece em 0 caso haja algum resíduo acumulado
+        q_rel = np.maximum(0.0, q_arr - float(q_arr[0]))
+        cap_max = float(np.max(q_rel))
+        dt_h = float(t_arr[-1] - t_arr[0]) / 3600.0 if len(t_arr) >= 2 else 0.0
+        # Densidade de corrente real J (mA/g) = dQ / dt, imune ao truncamento de 4 casas decimais em Current(A)
+        j_mag = (cap_max / dt_h) if (dt_h > 1e-6 and cap_max > 0.5) else (i_med * 1000.0)
+        blocos.append({
+            "tipo": t_b,
+            "i_amp": i_med,
+            "j_mag": j_mag,
+            "q": q_rel,
+            "v": v_arr,
+            "t": t_arr,
+            "cap_max": cap_max,
+        })
+
+    # Pareia blocos cronológicos em ciclos reais completos (Chg -> DChg)
+    # Sempre que aparece um novo 'Chg' após um 'DChg' (mesmo dentro do mesmo Cycle Index!),
+    # inicia-se um novo ciclo real, eliminando 100% da sobreposição do ciclador!
+    ciclos_reais = []
+    ciclo_atual = None
+
+    for blk in blocos:
+        if blk["tipo"] == "Chg":
+            if ciclo_atual is not None and (ciclo_atual["chg"] is not None or ciclo_atual["dchg"] is not None):
+                ciclos_reais.append(ciclo_atual)
+            ciclo_atual = {"chg": blk, "dchg": None}
+        else:  # DChg
+            if ciclo_atual is None:
+                ciclo_atual = {"chg": None, "dchg": blk}
+            elif ciclo_atual["dchg"] is None:
+                ciclo_atual["dchg"] = blk
+                ciclos_reais.append(ciclo_atual)
+                ciclo_atual = None
+            else:
+                ciclos_reais.append(ciclo_atual)
+                ciclo_atual = {"chg": None, "dchg": blk}
+
+    if ciclo_atual is not None and (ciclo_atual["chg"] is not None or ciclo_atual["dchg"] is not None):
+        ciclos_reais.append(ciclo_atual)
+
+    trapz_fn = getattr(np, "trapezoid", getattr(np, "trapz", None))
+    resultados = []
+    for idx_c, item in enumerate(ciclos_reais, 1):
+        b_chg = item["chg"]
+        b_dchg = item["dchg"]
+
+        i_amp = (
+            b_dchg["i_amp"]
+            if (b_dchg is not None and b_dchg["i_amp"] > 0)
+            else (b_chg["i_amp"] if b_chg is not None else 0.0)
+        )
+        i_ma = i_amp * 1000.0
+        # Prefere o ramo de descarga (CC DChg) ou o maior J entre carga e descarga para evitar
+        # que uma etapa CV/taper ou queda momentânea na carga distorça a densidade de corrente do degrau
+        if b_chg is not None and b_dchg is not None and b_chg["cap_max"] > 5.0 and b_dchg["cap_max"] > 5.0:
+            j_mag = max(b_chg["j_mag"], b_dchg["j_mag"])
+        elif b_dchg is not None and b_dchg["j_mag"] > 0:
+            j_mag = b_dchg["j_mag"]
+        elif b_chg is not None and b_chg["j_mag"] > 0:
+            j_mag = b_chg["j_mag"]
+        else:
+            j_mag = i_ma
+
+        cap_chg = b_chg["cap_max"] if b_chg is not None else 0.0
+        cap_dchg = b_dchg["cap_max"] if b_dchg is not None else 0.0
+
+        # Ignora ciclos sem descarga válida
+        if cap_dchg <= 0.1:
+            continue
+
+        eff_coul = (cap_dchg / cap_chg * 100.0) if cap_chg > 1.0 else np.nan
+        # Para o 1º ciclo de formação (quando a célula já inicia parcialmente carregada, cap_chg << cap_dchg),
+        # evita distorcer a escala de eficiência coulômbica com valores > 120%
+        if np.isfinite(eff_coul) and eff_coul > 120.0:
+            eff_coul = np.nan
+
+        e_chg = abs(float(trapz_fn(b_chg["v"], b_chg["q"]))) if (b_chg is not None and len(b_chg["q"]) > 1) else 0.0
+        e_dchg = abs(float(trapz_fn(b_dchg["v"], b_dchg["q"]))) if (b_dchg is not None and len(b_dchg["q"]) > 1) else 0.0
+        eff_energ = (e_dchg / e_chg * 100.0) if (e_chg > 1e-6 and e_dchg > 0) else np.nan
+        if np.isfinite(eff_energ) and eff_energ > 120.0:
+            eff_energ = np.nan
+
+        resultados.append({
+            "ciclo": len(resultados) + 1,
+            "i_amp": i_amp,
+            "i_ma": round(i_ma, 4),
+            "j_mag": round(j_mag, 2),
+            "q_chg": b_chg["q"] if b_chg is not None else np.array([]),
+            "v_chg": b_chg["v"] if b_chg is not None else np.array([]),
+            "q_dchg": b_dchg["q"] if b_dchg is not None else np.array([]),
+            "v_dchg": b_dchg["v"] if b_dchg is not None else np.array([]),
+            "cap_chg": cap_chg,
+            "cap_dchg": cap_dchg,
+            "eff_coul": eff_coul,
+            "eff_energ": eff_energ,
+        })
+
+    # Detecta se o 1º ciclo é incompleto (célula já "nasceu" carregada: carga inicial < 30% da descarga)
+    tem_primeiro_incompleto = False
+    if len(resultados) >= 2:
+        r0 = resultados[0]
+        if r0["cap_dchg"] > 0 and r0["cap_chg"] < (0.30 * r0["cap_dchg"]):
+            tem_primeiro_incompleto = True
+
+    return resultados, tem_primeiro_incompleto
+
+
+def _calcular_zonas_rate_chines(ciclos_filtrados):
+    zonas_rate = []
+    if not ciclos_filtrados:
+        return zonas_rate
+    j_brutos = [float(r.get("j_mag", r["i_ma"])) for r in ciclos_filtrados]
+    n_c = len(j_brutos)
+    # Filtro de mediana de janela 3 (mantendo bordas) para eliminar qualquer glitch isolado de 1 ciclo
+    j_suave = []
+    for i in range(n_c):
+        if 0 < i < n_c - 1:
+            j_suave.append(float(np.median([j_brutos[i - 1], j_brutos[i], j_brutos[i + 1]])))
+        else:
+            j_suave.append(j_brutos[i])
+
+    inicio_z = 0.5
+    j_ref = j_suave[0]
+    c_prev = ciclos_filtrados[0]["ciclo"]
+    for idx_r in range(1, n_c):
+        r = ciclos_filtrados[idx_r]
+        j_cur = j_suave[idx_r]
+        if abs(j_cur - j_ref) > max(1.0, 0.35 * max(j_ref, 1e-4)):
+            fim_z = c_prev + 0.5
+            zonas_rate.append({
+                "start": inicio_z,
+                "end": fim_z,
+                "mid": (inicio_z + fim_z) / 2.0,
+                "i_ma": r["i_ma"],
+                "j_mag": j_ref,
+            })
+            inicio_z = fim_z
+            j_ref = j_cur
+        c_prev = r["ciclo"]
+    fim_z = c_prev + 0.5
+    zonas_rate.append({
+        "start": inicio_z,
+        "end": fim_z,
+        "mid": (inicio_z + fim_z) / 2.0,
+        "i_ma": ciclos_filtrados[-1]["i_ma"],
+        "j_mag": j_ref,
+    })
+    return zonas_rate
+
+
+def _obter_ciclos_filtrados_ciclador_chines(dados_bytes, incluir_primeiro_ciclo=False):
+    ciclos_brutos, tem_primeiro_incompleto = _parsear_ciclador_chines_bruto(dados_bytes)
+    if not ciclos_brutos:
+        return [], [], False
+
+    if tem_primeiro_incompleto and not incluir_primeiro_ciclo:
+        lista_uso = [dict(c) for c in ciclos_brutos[1:]]
+        for idx_n, c in enumerate(lista_uso, 1):
+            c["ciclo"] = idx_n
+    else:
+        lista_uso = [dict(c) for c in ciclos_brutos]
+
+    zonas_rate = _calcular_zonas_rate_chines(lista_uso)
+    return lista_uso, zonas_rate, tem_primeiro_incompleto
+
+
+def _consolidar_ciclador_chines(lista_arquivos, tecnica_idx, mapa_ciclos_usuario=None):
+    """
+    Adapta os dados corrigidos do ciclador chinês para qualquer técnica de bateria do PhVolt:
+    - GCD Bateria (2) e dQ/dV (10)
+    - Rate Capability Bateria (3)
+    - Ciclabilidade Multiplot (4)
+    - Ciclabilidade & Eficiência Individual (5)
+    """
+    primeiro = lista_arquivos[0]
+    nome_base = Path(primeiro["nome"]).stem
+    incluir_c1 = bool(st.session_state.get("chines_incluir_primeiro_ciclo", False))
+    ciclos_reais, zonas_rate, _ = _obter_ciclos_filtrados_ciclador_chines(primeiro["bytes"], incluir_primeiro_ciclo=incluir_c1)
+    if not ciclos_reais:
+        return pd.DataFrame(), []
+
+    # Técnica 2 (GCD Bateria) e Técnica 10 (dQ/dV)
+    if tecnica_idx in [2, 10]:
+        ciclos_disp = [c["ciclo"] for c in ciclos_reais]
+        ciclos_alvo = (mapa_ciclos_usuario or {}).get(nome_base)
+        if not ciclos_alvo:
+            # Se for um ensaio de Rate Capability (vários patamares de corrente), seleciona por padrão
+            # um ciclo estabilizado de cada patamar de corrente; caso contrário, o último ciclo!
+            if len(zonas_rate) > 1:
+                selecionados = []
+                for z in zonas_rate:
+                    c_no_degrau = [c["ciclo"] for c in ciclos_reais if z["start"] <= c["ciclo"] <= z["end"]]
+                    if c_no_degrau:
+                        selecionados.append(c_no_degrau[-1])
+                ciclos_alvo = selecionados if selecionados else [ciclos_disp[-1]]
+            else:
+                ciclos_alvo = [ciclos_disp[-1]]
+
+        mapa_por_id = {c["ciclo"]: c for c in ciclos_reais}
+        blocos_series = []
+        ciclos_estruturados = []
+
+        for cid in ciclos_alvo:
+            c_obj = mapa_por_id.get(int(cid))
+            if c_obj is None:
+                continue
+            i_str = f"{c_obj['j_mag']:.0f} mA/g" if c_obj.get("j_mag", 0) > 10 else f"{c_obj['i_ma']:g} mA"
+            rotulo = f"Ciclo {cid} ({i_str})" if len(zonas_rate) > 1 else f"Ciclo {cid}"
+            blocos_series.extend([
+                pd.Series(c_obj["q_chg"], name=f"Q_chg_{rotulo}"),
+                pd.Series(c_obj["v_chg"], name=f"V_chg_{rotulo}"),
+                pd.Series(c_obj["q_dchg"], name=f"Q_dchg_{rotulo}"),
+                pd.Series(c_obj["v_dchg"], name=f"V_dchg_{rotulo}"),
+            ])
+            ciclos_estruturados.append({
+                "nome": rotulo,
+                "x_chg": c_obj["q_chg"],
+                "y_chg": c_obj["v_chg"],
+                "x_dchg": c_obj["q_dchg"],
+                "y_dchg": c_obj["v_dchg"],
+            })
+
+        st.session_state["_ciclos_gcd_mpr_cache"] = ciclos_estruturados
+        df_out = pd.concat(blocos_series, axis=1) if blocos_series else pd.DataFrame()
+        return df_out, [c["nome"] for c in ciclos_estruturados]
+
+    # Técnica 3: Rate Capability (Bateria)
+    if tecnica_idx == 3:
+        if len(zonas_rate) > 1:
+            st.session_state["_rate_mpr_zonas_dinamicas"] = zonas_rate
+        else:
+            st.session_state.pop("_rate_mpr_zonas_dinamicas", None)
+
+        series_pareadas = []
+        tokens_pareados = []
+        max_len = 0
+        dados_amostras = []
+
+        for arq in lista_arquivos:
+            if not _eh_arquivo_ciclador_chines(arq["bytes"]):
+                continue
+            c_list, _, _ = _obter_ciclos_filtrados_ciclador_chines(arq["bytes"], incluir_primeiro_ciclo=incluir_c1)
+            if not c_list:
+                continue
+            nm = Path(arq["nome"]).stem
+            vals = [c["cap_dchg"] for c in c_list]
+            max_len = max(max_len, len(vals))
+            dados_amostras.append((nm, vals))
+
+        if not dados_amostras:
+            return pd.DataFrame(), []
+
+        series_pareadas.append(pd.Series(np.arange(1, max_len + 1, dtype=int), name="Ciclo"))
+        tokens_pareados.append("Ciclo")
+        for nm, vals in dados_amostras:
+            series_pareadas.append(pd.Series(vals, name=nm))
+            tokens_pareados.append(nm)
+
+        return pd.concat(series_pareadas, axis=1), tokens_pareados
+
+    # Técnica 4: Ciclabilidade Multiplot (Bateria)
+    if tecnica_idx == 4:
+        series_pareadas = []
+        tokens_pareados = []
+        for arq in lista_arquivos:
+            if not _eh_arquivo_ciclador_chines(arq["bytes"]):
+                continue
+            c_list, _, _ = _obter_ciclos_filtrados_ciclador_chines(arq["bytes"], incluir_primeiro_ciclo=incluir_c1)
+            if not c_list:
+                continue
+            nm = Path(arq["nome"]).stem
+            s_cic = pd.Series([c["ciclo"] for c in c_list], name=f"Ciclo_{nm}")
+            s_cap = pd.Series([c["cap_dchg"] for c in c_list], name=nm)
+            series_pareadas.extend([s_cic, s_cap])
+            tokens_pareados.extend(["Ciclo", nm])
+
+        df_out = pd.concat(series_pareadas, axis=1) if series_pareadas else pd.DataFrame()
+        return df_out, tokens_pareados
+
+    # Técnica 5: Ciclabilidade & Eficiência Individual (Bateria)
+    if tecnica_idx == 5:
+        df_out = pd.DataFrame({
+            "Ciclo": [c["ciclo"] for c in ciclos_reais],
+            "Cap_Descarga": [c["cap_dchg"] for c in ciclos_reais],
+            "Eficiencia": [c["eff_coul"] if np.isfinite(c["eff_coul"]) else 100.0 for c in ciclos_reais],
+            "Eficiencia_Energetica": [c["eff_energ"] for c in ciclos_reais],
+        })
+        return df_out, ["Ciclo", "Cap_Descarga", "Eficiencia", "Eficiencia_Energetica"]
+
+    return pd.DataFrame(), []
+
+
+def processar_cabecalho_e_dados(fonte_dados):
+    arquivos_lista = st.session_state.get("arquivos_mpr_lista", [])
+    if arquivos_lista:
+        primeiro_arq = arquivos_lista[0]
+        primeiro_nome = primeiro_arq["nome"].lower()
+        tecnica_atual = st.session_state.get("tecnica_idx", 0)
+        if primeiro_nome.endswith(".mpr"):
+            massa_mg = st.session_state.get("mpr_massa_ativa_mg", 1.0)
+            return consolidar_arquivos_mpr(arquivos_lista, tecnica_atual, massa_mg)
+        elif _eh_arquivo_ciclador_chines(primeiro_arq["bytes"]) and tecnica_atual in [2, 3, 4, 5, 10]:
+            mapa_ciclos_usuario = st.session_state.get("mpr_ciclos_por_amostra", {})
+            return _consolidar_ciclador_chines(arquivos_lista, tecnica_atual, mapa_ciclos_usuario)
+        elif len(arquivos_lista) > 1 and (
+            primeiro_nome.endswith(".txt")
+            or primeiro_nome.endswith(".dat")
+            or primeiro_nome.endswith(".csv")
+        ):
+            return consolidar_arquivos_texto(arquivos_lista, tecnica_atual)
+
+    if _eh_arquivo_ciclador_chines(fonte_dados):
+        raw_b = fonte_dados.getvalue() if hasattr(fonte_dados, "getvalue") else (bytes(fonte_dados) if isinstance(fonte_dados, (bytes, bytearray)) else open(fonte_dados, "rb").read())
+        tecnica_atual = st.session_state.get("tecnica_idx", 0)
+        mapa_ciclos_usuario = st.session_state.get("mpr_ciclos_por_amostra", {})
+        return _consolidar_ciclador_chines([{"nome": "amostra.txt", "bytes": raw_b}], tecnica_atual, mapa_ciclos_usuario)
+
+    return _parse_arquivo_texto_unico(fonte_dados)
+
+
 def extrair_ciclos_gcd(fonte_dados, df):
     arquivos_mpr = st.session_state.get("arquivos_mpr_lista", [])
-    if arquivos_mpr and arquivos_mpr[0]["nome"].lower().endswith(".mpr"):
+    if arquivos_mpr and (arquivos_mpr[0]["nome"].lower().endswith(".mpr") or _eh_arquivo_ciclador_chines(arquivos_mpr[0]["bytes"])):
         return st.session_state.get("_ciclos_gcd_mpr_cache", [])
 
     linhas = extrair_linhas_arquivo(fonte_dados)
@@ -1153,9 +1734,9 @@ def extrair_ciclos_gcd(fonte_dados, df):
 def identificar_amostras(df, tokens_limpos, tecnica_idx):
     tokens_limpos = [str(t) for t in tokens_limpos]
     num_cols = df.shape[1]
-    if tecnica_idx == 2:
+    if tecnica_idx in [2, 10]:
         arquivos_mpr = st.session_state.get("arquivos_mpr_lista", [])
-        if arquivos_mpr and arquivos_mpr[0]["nome"].lower().endswith(".mpr"):
+        if arquivos_mpr and (arquivos_mpr[0]["nome"].lower().endswith(".mpr") or _eh_arquivo_ciclador_chines(arquivos_mpr[0]["bytes"])):
             cache = st.session_state.get("_ciclos_gcd_mpr_cache", [])
             return [c["nome"] for c in cache] if cache else ["Ciclo 1"]
         num_blocos = max(1, num_cols // 4)
@@ -1166,12 +1747,11 @@ def identificar_amostras(df, tokens_limpos, tecnica_idx):
         if len(legendas) < num_curvas:
             legendas = [f"Sample {i+1}" for i in range(num_curvas)]
         return legendas[:num_curvas]
-    elif tecnica_idx == 5:
+    elif tecnica_idx in [5, 15]:
         return ["Discharge Capacity", "Coulombic Efficiency"]
     elif tecnica_idx == 7:
         return ["Ecell", "Ewe (Positivo)", "Ece (Negativo)"]
-    elif tecnica_idx == 9:
-        # EIE - Bode: blocos de 3 colunas (|Z|, Freq, Fase)
+    elif tecnica_idx in [9, 16]:
         num_blocos = max(1, num_cols // 3)
         nomes = []
         for b in range(num_blocos):
@@ -1189,4 +1769,87 @@ def identificar_amostras(df, tokens_limpos, tecnica_idx):
             nomes = tokens_limpos
         if len(nomes) < num_amostras:
             nomes = nomes + [f"Sample {i+1}" for i in range(len(nomes), num_amostras)]
-        return nomes[:num_amostras]
+        nomes_brutos = nomes[:num_amostras]
+
+        if tecnica_idx in [12, 13]:
+            tag_t = "ragone" if tecnica_idx == 12 else "rate_sc"
+            agrupar = st.session_state.get(f"sc_rr_group_{tag_t}", True)
+            if agrupar:
+                from tecnicas.ragone_rate_sc import _extrair_grupo_amostra_sc
+                grupos_unicos = []
+                for nb in nomes_brutos:
+                    grp = _extrair_grupo_amostra_sc(nb)
+                    if grp not in grupos_unicos:
+                        grupos_unicos.append(grp)
+                if len(grupos_unicos) == len(nomes_brutos) and len(nomes_brutos) >= 2:
+                    nome_def = Path(st.session_state.get("nome_arquivo_anterior", "Supercapacitor")).stem
+                    return [nome_def]
+                return grupos_unicos
+        return nomes_brutos
+
+
+def consolidar_arquivos_texto(arquivos_lista, tecnica_idx):
+    """
+    Lê e consolida múltiplos arquivos de texto (.txt, .dat, .csv) carregados em paralelo
+    em um único DataFrame unificado, adequado para cada técnica eletroquímica.
+    """
+    dfs_processados = []
+    tokens_globais = ["Cycle"] if tecnica_idx == 3 else ["Index"]
+    nomes_usados = {}
+
+    for idx, arq in enumerate(arquivos_lista):
+        try:
+            df_i, _ = _parse_arquivo_texto_unico(arq["bytes"])
+            nome_base = Path(arq["nome"]).stem
+            if nome_base in nomes_usados:
+                nomes_usados[nome_base] += 1
+                nome_unico = f"{nome_base}_{nomes_usados[nome_base]}"
+            else:
+                nomes_usados[nome_base] = 1
+                nome_unico = nome_base
+
+            if df_i.empty or df_i.shape[1] < 2:
+                continue
+
+            if tecnica_idx == 3:
+                # Rate capability: Coluna 0 = Ciclo, Coluna 1 = Capacidade (alinhados por Ciclo)
+                sub_rc = df_i.iloc[:, :2].dropna().copy()
+                sub_rc.columns = ["Ciclo", nome_unico]
+                dfs_processados.append(sub_rc)
+                tokens_globais.append(nome_unico)
+            elif tecnica_idx in [2, 10]:
+                # GCD Bateria / dQ/dV: cada arquivo traz 4 colunas [Q_chg, V_chg, Q_dchg, V_dchg]
+                if df_i.shape[1] >= 4:
+                    df_g = df_i.iloc[:, :4].copy()
+                    df_g.columns = [f"Qc_{idx}", f"Vc_{idx}", f"Qd_{idx}", f"Vd_{idx}"]
+                    dfs_processados.append(df_g)
+                    tokens_globais.extend([nome_unico, "", "", ""])
+            elif tecnica_idx in [9, 16]:
+                # Bode: blocos de 3 colunas (|Z|, Freq, Fase) por arquivo
+                if df_i.shape[1] >= 3:
+                    df_b = df_i.iloc[:, :3].copy()
+                    df_b.columns = [f"Z_{idx}", f"Freq_{idx}", f"Phase_{idx}"]
+                    dfs_processados.append(df_b)
+                    tokens_globais.extend([f"|Z| ({nome_unico})", f"Freq ({nome_unico})", nome_unico])
+            else:
+                # CV, EIE Nyquist, CGCD 2E, BET: Pares de colunas (X, Y) por arquivo
+                df_p = df_i.iloc[:, :2].copy()
+                df_p.columns = [f"X_{idx}", f"Y_{idx}"]
+                dfs_processados.append(df_p)
+                tokens_globais.extend([f"X ({nome_unico})", nome_unico])
+        except Exception:
+            pass
+
+    if not dfs_processados:
+        return pd.DataFrame(), ["Index", "Data"]
+
+    if tecnica_idx == 3:
+        # Combina Rate / Ciclabilidade pelo eixo X (Ciclo)
+        df_final = dfs_processados[0]
+        for d in dfs_processados[1:]:
+            df_final = pd.merge(df_final, d, on="Ciclo", how="outer")
+        df_final = df_final.sort_values("Ciclo").reset_index(drop=True)
+        return df_final, tokens_globais
+    else:
+        df_final = pd.concat(dfs_processados, axis=1)
+        return df_final, tokens_globais

@@ -1,6 +1,7 @@
 from .config import (
     MARCADORES_PADRAO,
     PALETAS_DISPONIVEIS,
+    PRESETS_REVISTAS,
     TEXTOS_PADRAO,
     obter_tema_visual,
 )
@@ -14,5 +15,6 @@ from .io_readers import (
 from .metrics import calcular_resumo_parametros
 from .plot_utils import (
     aplicar_ajustes_eixos_e_legenda,
+    aplicar_preset_revista_figura,
     estilar_figura_e_eixos,
 )

@@ -598,6 +598,7 @@ def _calcular_metricas_gcd_bateria(fonte_dados, mapa_nomes, massa_mg):
 
         v_med_dchg = np.nan
         energia_wh_kg = np.nan
+        energia_chg_wh_kg = np.nan
         if len(x_dchg) > 1 and cap_dchg > 1e-6:
             ordem = np.argsort(x_dchg)
             q_ord = x_dchg[ordem]
@@ -606,11 +607,22 @@ def _calcular_metricas_gcd_bateria(fonte_dados, mapa_nomes, massa_mg):
             v_med_dchg = energia_mwh_g / cap_dchg
             energia_wh_kg = energia_mwh_g
 
+        if len(x_chg) > 1 and cap_chg > 1e-6:
+            ordem_c = np.argsort(x_chg)
+            energia_chg_wh_kg = abs(_trapz(y_chg[ordem_c], x_chg[ordem_c]))
+
+        eff_energetica = (
+            (energia_wh_kg / energia_chg_wh_kg * 100.0)
+            if (np.isfinite(energia_wh_kg) and np.isfinite(energia_chg_wh_kg) and energia_chg_wh_kg > 1e-6)
+            else np.nan
+        )
+
         linhas.append({
             "Curva / Ciclo": rotulo,
             "Cap. Carga (mAh/g)": round(cap_chg, 2),
             "Cap. Descarga (mAh/g)": round(cap_dchg, 2),
             "Eficiência Coulômbica (%)": round(eficiencia, 2) if np.isfinite(eficiencia) else "—",
+            "Eficiência Energética (%)": round(eff_energetica, 2) if np.isfinite(eff_energetica) else "—",
             "IR Drop (mV)": round(ir_drop_mv, 1),
             "Potencial Médio Desc. (V)": round(v_med_dchg, 3) if np.isfinite(v_med_dchg) else "—",
             "Energia Específica (Wh/kg)": round(energia_wh_kg, 2) if np.isfinite(energia_wh_kg) else "—",
@@ -663,23 +675,54 @@ def _calcular_metricas_ciclabilidade(fonte_dados, mapa_nomes, tecnica_idx):
     if df.empty:
         return pd.DataFrame()
 
+    eh_sc_cicl = tecnica_idx in [14, 15]
+    un_cap = "F/g" if eh_sc_cicl else "mAh/g"
+    rot_grandeza = "Capacitância" if eh_sc_cicl else "Cap."
+
     linhas = []
-    if tecnica_idx == 5:
-        sub = df.iloc[:, [0, 2, 3]].dropna() if df.shape[1] >= 4 else df.iloc[:, :3].dropna()
-        if sub.empty:
+    if tecnica_idx in [5, 15]:
+        cols_lower = [str(c).lower() for c in df.columns]
+        y_eff_en = None
+        if "eficiencia_energetica" in cols_lower:
+            sub = df[["Ciclo", "Cap_Descarga", "Eficiencia"]].dropna()
+            cic = sub["Ciclo"].to_numpy(float)
+            cap = sub["Cap_Descarga"].to_numpy(float)
+            eff = sub["Eficiencia"].to_numpy(float)
+            if "Eficiencia_Energetica" in df.columns:
+                y_eff_en = df.loc[sub.index, "Eficiencia_Energetica"].to_numpy(float)
+        elif df.shape[1] >= 5:
+            sub = df.iloc[:, [0, 2, 3, 4]].dropna(subset=[df.columns[0], df.columns[2], df.columns[3]])
+            cic = sub.iloc[:, 0].to_numpy(float)
+            cap = sub.iloc[:, 1].to_numpy(float)
+            eff = sub.iloc[:, 2].to_numpy(float)
+            y_eff_en = sub.iloc[:, 3].to_numpy(float)
+        elif df.shape[1] == 4:
+            sub = df.iloc[:, [0, 2, 3]].dropna()
+            cic = sub.iloc[:, 0].to_numpy(float)
+            cap = sub.iloc[:, 1].to_numpy(float)
+            eff = sub.iloc[:, 2].to_numpy(float)
+        else:
+            sub = df.iloc[:, :3].dropna()
+            cic = sub.iloc[:, 0].to_numpy(float)
+            cap = sub.iloc[:, 1].to_numpy(float)
+            eff = sub.iloc[:, 2].to_numpy(float)
+
+        if len(cic) == 0:
             return pd.DataFrame()
-        cic = sub.iloc[:, 0].to_numpy(float)
-        cap = sub.iloc[:, 1].to_numpy(float)
-        eff = sub.iloc[:, 2].to_numpy(float)
+
         ret = (cap[-1] / cap[0] * 100.0) if cap[0] > 0 else 0.0
-        linhas.append({
-            "Amostra": st.session_state.get("ce_nm", "Amostra"),
+        key_nm = "sc_ce_nm" if tecnica_idx == 15 else "ce_nm"
+        row_ind = {
+            "Amostra": st.session_state.get(key_nm, "Amostra"),
             "Ciclos Avaliados": int(len(cic)),
-            "Cap. Inicial (mAh/g)": round(float(cap[0]), 2),
-            "Cap. Final (mAh/g)": round(float(cap[-1]), 2),
+            f"{rot_grandeza} Inicial ({un_cap})": round(float(cap[0]), 2),
+            f"{rot_grandeza} Final ({un_cap})": round(float(cap[-1]), 2),
             "Retenção (%)": round(float(ret), 1),
             "Eficiência Coulômbica Média (%)": round(float(np.mean(eff)), 2),
-        })
+        }
+        if y_eff_en is not None and np.any(np.isfinite(y_eff_en)):
+            row_ind["Eficiência Energética Média (%)"] = round(float(np.nanmean(y_eff_en)), 2)
+        linhas.append(row_ind)
         return pd.DataFrame(linhas)
 
     num_cols = df.shape[1]
@@ -701,8 +744,8 @@ def _calcular_metricas_ciclabilidade(fonte_dados, mapa_nomes, tecnica_idx):
         linhas.append({
             "Amostra": rotulo,
             "Ciclo Final": int(cic[-1]),
-            "Cap. Inicial (mAh/g)": round(float(cap[0]), 2),
-            "Cap. Final (mAh/g)": round(float(cap[-1]), 2),
+            f"{rot_grandeza} Inicial ({un_cap})": round(float(cap[0]), 2),
+            f"{rot_grandeza} Final ({un_cap})": round(float(cap[-1]), 2),
             "Retenção (%)": round(float(ret), 1),
         })
 
@@ -754,9 +797,16 @@ def _analisar_ramo_cgcd_individual(
     if eh_celula:
         energia_wh_kg = (i_dchg_amp * int_v_dt) / (3.6 * massa_g) if (i_dchg_amp and i_dchg_amp > 0) else 0.0
         potencia_w_kg = (energia_wh_kg * 3600.0) / dt_dchg if dt_dchg > 0 else 0.0
+        i_c_ef = i_chg_amp if (i_chg_amp and i_chg_amp > 0) else i_dchg_amp
+        v_c_shift = np.maximum(0.0, v_chg - v_ref_min) if descida_normal else np.maximum(0.0, v_fim - v_chg)
+        int_vc_dt = _trapz(v_c_shift, t_chg) if len(t_chg) > 1 else 0.0
+        energia_chg_wh_kg = (i_c_ef * int_vc_dt) / (3.6 * massa_g) if (i_c_ef and i_c_ef > 0) else 0.0
+        eff_energ_sc = (energia_wh_kg / energia_chg_wh_kg * 100.0) if (energia_wh_kg > 0 and energia_chg_wh_kg > 1e-9) else np.nan
         row["Energia (Wh/kg)"] = round(energia_wh_kg, 4) if energia_wh_kg > 0 else "—"
         row["Potência (W/kg)"] = round(potencia_w_kg, 2) if potencia_w_kg > 0 else "—"
-    row["Eficiência (%)"] = round(eficiencia, 2)
+    row["Eficiência Coulômbica (%)"] = round(eficiencia, 2)
+    if eh_celula:
+        row["Eficiência Energética (%)"] = round(eff_energ_sc, 2) if (np.isfinite(eff_energ_sc) and 0 < eff_energ_sc <= 120.0) else "—"
     return row
 
 
@@ -768,11 +818,32 @@ def _calcular_metricas_supercapacitor_cgcd(
     massa_pos_mg=None,
     massa_neg_mg=None,
     densidades_por_curva=None,
+    massas_por_amostra=None,
+    densidades_lista_por_amostra=None,
 ):
     massa_celula_g = max(float(massa_mg or 1.0), 1e-6) / 1000.0
     massa_pos_g = max(float(massa_pos_mg if massa_pos_mg is not None else massa_mg or 1.0), 1e-6) / 1000.0
     massa_neg_g = max(float(massa_neg_mg if massa_neg_mg is not None else massa_mg or 1.0), 1e-6) / 1000.0
     densidades_por_curva = densidades_por_curva or {}
+    massas_por_amostra = massas_por_amostra or {}
+    densidades_lista_por_amostra = densidades_lista_por_amostra or {}
+    contador_curvas_por_grupo = {}
+
+    def _resolver_massa_curva_g(nome_curva_str):
+        if not massas_por_amostra:
+            return massa_celula_g
+        from tecnicas.ragone_rate_sc import _extrair_grupo_amostra_sc
+        grp = _extrair_grupo_amostra_sc(nome_curva_str)
+        rot_grp = mapa_nomes.get(grp, grp)
+        m_val = (
+            massas_por_amostra.get(grp)
+            or massas_por_amostra.get(rot_grp)
+            or massas_por_amostra.get(nome_curva_str)
+            or (next(iter(massas_por_amostra.values())) if len(massas_por_amostra) == 1 else None)
+        )
+        if m_val is not None and float(m_val) > 0:
+            return float(m_val) / 1000.0
+        return massa_celula_g
 
     arquivos_mpr = st.session_state.get("arquivos_mpr_lista", [])
     mapa_ciclos_usuario = st.session_state.get("mpr_ciclos_por_amostra", {})
@@ -868,7 +939,8 @@ def _calcular_metricas_supercapacitor_cgcd(
                     else:
                         chave = f"Ciclo {int(cid)}" if len(ciclos_alvo) > 1 else nome_amostra
                     rotulo = mapa_nomes.get(chave, chave)
-                    linhas.append(_analisar_ramo_cgcd_individual(rotulo, t_chg, v_chg, t_dchg, v_dchg, i_dchg_amp, massa_celula_g, eh_celula=True, i_chg_amp=i_chg_amp))
+                    m_curva_g = _resolver_massa_curva_g(chave)
+                    linhas.append(_analisar_ramo_cgcd_individual(rotulo, t_chg, v_chg, t_dchg, v_dchg, i_dchg_amp, m_curva_g, eh_celula=True, i_chg_amp=i_chg_amp))
 
         return pd.DataFrame(linhas)
 
@@ -904,14 +976,33 @@ def _calcular_metricas_supercapacitor_cgcd(
         chave = str(nomes_y[idx]).strip() if idx < len(nomes_y) else f"Janela {idx + 1}"
         rotulo = mapa_nomes.get(chave, chave)
 
+        from tecnicas.ragone_rate_sc import _extrair_grupo_amostra_sc
+        grp_atual = _extrair_grupo_amostra_sc(chave)
+        rot_grp_atual = mapa_nomes.get(grp_atual, grp_atual)
+        idx_no_grupo = contador_curvas_por_grupo.get(grp_atual, 0)
+        contador_curvas_por_grupo[grp_atual] = idx_no_grupo + 1
+
+        lista_j_grupo = (
+            densidades_lista_por_amostra.get(grp_atual)
+            or densidades_lista_por_amostra.get(rot_grp_atual)
+            or (next(iter(densidades_lista_por_amostra.values())) if len(densidades_lista_por_amostra) == 1 else None)
+        )
+        j_da_lista = (
+            float(lista_j_grupo[idx_no_grupo])
+            if (lista_j_grupo and idx_no_grupo < len(lista_j_grupo) and lista_j_grupo[idx_no_grupo] > 0)
+            else None
+        )
+
         j_ag = (
-            densidades_por_curva.get(chave)
+            j_da_lista
+            or densidades_por_curva.get(chave)
             or densidades_por_curva.get(rotulo)
             or densidades_por_curva.get("__unica__")
             or _extrair_densidade_do_nome(rotulo)
             or _extrair_densidade_do_nome(chave)
         )
-        i_amp = (float(j_ag) * massa_celula_g) if (j_ag and float(j_ag) > 0) else 0.0
+        m_curva_g = _resolver_massa_curva_g(chave)
+        i_amp = (float(j_ag) * m_curva_g) if (j_ag and float(j_ag) > 0) else 0.0
 
         blocos = _separar_blocos_nan([sub.iloc[:, 0].to_numpy(float), sub.iloc[:, 1].to_numpy(float)])
         for b_idx, (t, v) in enumerate(blocos):
@@ -921,7 +1012,7 @@ def _calcular_metricas_supercapacitor_cgcd(
                 linhas.append(
                     _analisar_ramo_cgcd_individual(
                         nome_exib, t[: idx_pico + 1], v[: idx_pico + 1], t[idx_pico:], v[idx_pico:],
-                        i_amp, massa_celula_g, eh_celula=True, i_chg_amp=i_amp
+                        i_amp, m_curva_g, eh_celula=True, i_chg_amp=i_amp
                     )
                 )
 
@@ -965,6 +1056,132 @@ def _calcular_metricas_bet(fonte_dados, mapa_nomes, areas_bet):
     return pd.DataFrame(linhas)
 
 
+
+
+def _calcular_metricas_dqdv(fonte_dados, mapa_nomes, params):
+    from tecnicas.dqdv import _calcular_curva_dqdv_ramo
+    df, _ = processar_cabecalho_e_dados(fonte_dados)
+    ciclos = extrair_ciclos_gcd(fonte_dados, df)
+    janela = int(params.get("dqdv_janela", 11))
+    passo_v = max(float(params.get("dqdv_passo_mv", 3.0)) / 1000.0, 0.0005)
+    linhas = []
+
+    for c in ciclos:
+        chave = c["nome"]
+        rotulo = mapa_nomes.get(chave, chave)
+        v_ox, dq_ox = "—", "—"
+        v_red, dq_red = "—", "—"
+        delta_ep_mv = "—"
+
+        v_c, dq_c = _calcular_curva_dqdv_ramo(c["x_chg"], c["y_chg"], eh_carga=True, janela_suav=janela, passo_v_min=passo_v)
+        if len(v_c) > 0:
+            idx_p_ox = int(np.argmax(dq_c))
+            v_ox = round(float(v_c[idx_p_ox]), 3)
+            dq_ox = round(float(dq_c[idx_p_ox]), 1)
+
+        v_d, dq_d = _calcular_curva_dqdv_ramo(c["x_dchg"], c["y_dchg"], eh_carga=False, janela_suav=janela, passo_v_min=passo_v)
+        if len(v_d) > 0:
+            idx_p_red = int(np.argmin(dq_d))
+            v_red = round(float(v_d[idx_p_red]), 3)
+            dq_red = round(float(dq_d[idx_p_red]), 1)
+
+        if isinstance(v_ox, float) and isinstance(v_red, float):
+            delta_ep_mv = round(abs(v_ox - v_red) * 1000.0, 1)
+
+        linhas.append({
+            "Curva / Ciclo": rotulo,
+            "E_pico Carga / Ox. (V)": v_ox,
+            "dQ/dV máx Carga (mAh/g·V)": dq_ox,
+            "E_pico Descarga / Red. (V)": v_red,
+            "dQ/dV mín Descarga (mAh/g·V)": dq_red,
+            "Histerese ΔE_p (mV)": delta_ep_mv,
+        })
+
+    return pd.DataFrame(linhas)
+
+
+def _calcular_metricas_cinetica_cv(fonte_dados, params):
+    from tecnicas.cinetica_cv import analisar_cinetica_cv_dados
+    res = analisar_cinetica_cv_dados(
+        fonte_dados,
+        taxas_manuais=params.get("taxas_por_curva"),
+        taxa_alvo_dunn_mvs=params.get("taxa_alvo_dunn_mvs"),
+        modo_esr=params.get("modo_esr", "sem"),
+        valor_esr_ohm=params.get("valor_esr_ohm", 0.0),
+    )
+    if res is None:
+        return pd.DataFrame()
+    df_out = res["df_dunn"].copy()
+    df_out["b Anódico (R²)"] = f"{res['b_anod']:.2f} ({res['r2_anod']:.3f})"
+    df_out["b Catódico (R²)"] = f"{res['b_cat']:.2f} ({res['r2_cat']:.3f})"
+    if res.get("esr_usada_ohm", 0) > 0:
+        df_out["ESR Compensada (Ω)"] = round(float(res["esr_usada_ohm"]), 2)
+    return df_out
+
+
+
+
+def _calcular_metricas_ragone_rate_sc(fonte_dados, mapa_nomes, massa_mg, params):
+    from tecnicas.ragone_rate_sc import extrair_series_ragone_rate_sc
+    nome_def = st.session_state.get("nome_arquivo_anterior", "Supercapacitor").split(".")[0]
+    _, df_tab = extrair_series_ragone_rate_sc(
+        fonte_dados,
+        mapa_nomes=mapa_nomes,
+        massa_mg=massa_mg,
+        densidades_por_curva=params.get("densidades_por_curva"),
+        densidades_lista_por_amostra=params.get("densidades_lista_por_amostra"),
+        massas_por_amostra=params.get("massas_por_amostra"),
+        agrupar_por_amostra=params.get("agrupar_por_amostra", True),
+        nome_amostra_unica=nome_def,
+    )
+    return df_tab
+
+
+
+
+def _calcular_metricas_bode_capacitancia(fonte_dados, mapa_nomes, massa_mg):
+    from tecnicas.bode_capacitancia import calcular_capacitancia_complexa_bode
+    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
+    num_blocos = df.shape[1] // 3
+    linhas = []
+
+    for b in range(num_blocos):
+        c_z, c_f, c_p = b * 3, b * 3 + 1, b * 3 + 2
+        sub = df.iloc[:, [c_z, c_f, c_p]].dropna()
+        if len(sub) < 3:
+            continue
+        chave = str(tokens_limpos[c_p]).strip() if c_p < len(tokens_limpos) else f"Sample {b + 1}"
+        if chave.upper() in ["FASE", "PHASE", "DEG", ""]:
+            chave = f"Sample {b + 1}"
+        rotulo = mapa_nomes.get(chave, chave)
+
+        modz = sub.iloc[:, 0].to_numpy(float)
+        freq = sub.iloc[:, 1].to_numpy(float)
+        fase = sub.iloc[:, 2].to_numpy(float)
+        m = (freq > 0) & (modz > 0) & np.isfinite(fase)
+        freq, modz, fase = freq[m], modz[m], fase[m]
+        if len(freq) < 3:
+            continue
+        ordem = np.argsort(freq)
+        freq, modz, fase = freq[ordem], modz[ordem], fase[ordem]
+        c_real, c_imag = calcular_capacitancia_complexa_bode(freq, modz, fase, massa_mg=massa_mg)
+
+        c0_fg = float(c_real[0])
+        c_max_imag = float(np.max(c_imag))
+        f0_hz = _estimar_f0_joelho(freq, fase)
+        tau0_ms = ((1.0 / (2.0 * np.pi * f0_hz)) * 1000.0) if (f0_hz and f0_hz > 0) else None
+
+        linhas.append({
+            "Amostra": rotulo,
+            "C'0 Baixa Freq. (F/g)": round(c0_fg, 2),
+            "C'' máx (F/g)": round(c_max_imag, 2),
+            "f₀ Joelho -45° (Hz)": round(f0_hz, 3) if f0_hz else "—",
+            "Constante de Tempo τ₀ (ms)": round(tau0_ms, 2) if tau0_ms else "—",
+        })
+
+    return pd.DataFrame(linhas)
+
+
 def calcular_resumo_parametros(
     fonte_dados,
     tecnica_idx,
@@ -992,7 +1209,7 @@ def calcular_resumo_parametros(
             return _calcular_metricas_gcd_bateria(fonte_dados, mapa_nomes, massa_mg)
         elif tecnica_idx == 3:
             return _calcular_metricas_rate_bateria(fonte_dados, mapa_nomes)
-        elif tecnica_idx in [4, 5]:
+        elif tecnica_idx in [4, 5, 14, 15]:
             return _calcular_metricas_ciclabilidade(fonte_dados, mapa_nomes, tecnica_idx)
         elif tecnica_idx in [6, 7]:
             return _calcular_metricas_supercapacitor_cgcd(
@@ -1008,6 +1225,14 @@ def calcular_resumo_parametros(
             return _calcular_metricas_bet(fonte_dados, mapa_nomes, params.get("areas_bet"))
         elif tecnica_idx == 9:
             return _calcular_metricas_bode(fonte_dados, mapa_nomes)
+        elif tecnica_idx == 10:
+            return _calcular_metricas_dqdv(fonte_dados, mapa_nomes, params)
+        elif tecnica_idx == 11:
+            return _calcular_metricas_cinetica_cv(fonte_dados, params)
+        elif tecnica_idx in [12, 13]:
+            return _calcular_metricas_ragone_rate_sc(fonte_dados, mapa_nomes, massa_mg, params)
+        elif tecnica_idx == 16:
+            return _calcular_metricas_bode_capacitancia(fonte_dados, mapa_nomes, massa_mg)
     except Exception:
         return pd.DataFrame()
 

@@ -14,10 +14,11 @@ def configurar_separador_decimal(ax, idioma="Português", eixo_y2=None):
             texto = f"{val:.4f}".rstrip("0").rstrip(".")
         return texto.replace(".", ",")
 
+    from matplotlib.ticker import FixedFormatter, ScalarFormatter
     formatter = FuncFormatter(_fmt_pt)
-    if ax.get_xscale() != "log":
+    if ax.get_xscale() != "log" and not isinstance(ax.xaxis.get_major_formatter(), FixedFormatter):
         ax.xaxis.set_major_formatter(formatter)
-    if ax.get_yscale() != "log":
+    if ax.get_yscale() != "log" and not isinstance(ax.yaxis.get_major_formatter(), FixedFormatter):
         ax.yaxis.set_major_formatter(formatter)
     if eixo_y2 is not None and eixo_y2.get_yscale() != "log":
         eixo_y2.yaxis.set_major_formatter(formatter)
@@ -61,7 +62,55 @@ def aplicar_subdivisoes_eixos(ax, limites_manuais, eixo_y2=None):
         eixo_y2.tick_params(axis="y", which="minor", length=3.5, width=1.0)
 
 
-def estilar_figura_e_eixos(fig, ax, tema, y_color=None, idioma="Português", eixo_y2=None):
+def aplicar_preset_revista_figura(fig, ax, preset_revista, eixo_y2=None):
+    """Aplica dimensões físicas, DPI, fontes, espessuras de linha e tamanhos de marcadores de um preset editorial."""
+    if not preset_revista:
+        return
+
+    w_in = preset_revista.get("largura_in")
+    h_in = preset_revista.get("altura_in")
+    dpi = preset_revista.get("dpi")
+    if w_in and h_in:
+        fig.set_size_inches(float(w_in), float(h_in), forward=True)
+    if dpi:
+        fig.set_dpi(int(dpi))
+
+    font_label = preset_revista.get("font_label")
+    font_tick = preset_revista.get("font_tick")
+    font_leg = preset_revista.get("font_leg")
+    lw_target = preset_revista.get("lw")
+    ms_target = preset_revista.get("ms")
+    spine_w = preset_revista.get("spine_w", 1.4)
+
+    eixos_alvo = [ax] + ([eixo_y2] if eixo_y2 is not None else [])
+    for a in eixos_alvo:
+        if font_label:
+            a.xaxis.label.set_fontsize(font_label)
+            a.yaxis.label.set_fontsize(font_label)
+        if font_tick:
+            a.tick_params(axis="both", which="major", labelsize=font_tick)
+        for sp in a.spines.values():
+            sp.set_linewidth(spine_w)
+        if lw_target:
+            for line in a.get_lines():
+                # Preserva linhas de referência finas e aplica espessura editorial nas curvas principais
+                if line.get_linewidth() >= 1.5:
+                    line.set_linewidth(lw_target)
+                if ms_target and line.get_marker() not in [None, "", "None"]:
+                    line.set_markersize(ms_target)
+        if ms_target:
+            for col in a.collections:
+                if hasattr(col, "set_sizes"):
+                    col.set_sizes([float(ms_target) ** 2])
+        leg = a.get_legend()
+        if leg and font_leg:
+            for txt in leg.get_texts():
+                txt.set_fontsize(font_leg)
+            if leg.get_title():
+                leg.get_title().set_fontsize(font_leg + 0.5)
+
+
+def estilar_figura_e_eixos(fig, ax, tema, y_color=None, idioma="Português", eixo_y2=None, preset_revista=None):
     fig.patch.set_facecolor(tema["fig_bg"])
     ax.set_facecolor(tema["ax_bg"])
     ax.xaxis.label.set_color(tema["text"])
@@ -76,6 +125,8 @@ def estilar_figura_e_eixos(fig, ax, tema, y_color=None, idioma="Português", eix
         spine.set_color(tema["spine"])
         spine.set_linewidth(1.4)
     configurar_separador_decimal(ax, idioma=idioma, eixo_y2=eixo_y2)
+    if preset_revista:
+        aplicar_preset_revista_figura(fig, ax, preset_revista, eixo_y2=eixo_y2)
 
 
 def aplicar_ajustes_eixos_e_legenda(
@@ -118,9 +169,9 @@ def aplicar_ajustes_eixos_e_legenda(
             n_itens = len(h_auto)
 
         ncol = max(1, n_itens) if legenda_horizontal else 1
+        pos_xy_custom = limites_manuais.get("legenda_xy") if isinstance(limites_manuais, dict) else None
 
         kwargs_leg = dict(
-            loc=posicao_legenda,
             frameon=True,
             facecolor=tema["box_bg"],
             edgecolor=tema["box_edge"],
@@ -129,6 +180,11 @@ def aplicar_ajustes_eixos_e_legenda(
             columnspacing=1.2 if legenda_horizontal else 2.0,
             handletextpad=0.5 if legenda_horizontal else 0.8,
         )
+        if posicao_legenda in ["Personalizada (X, Y)", "Custom (X, Y)"] and pos_xy_custom is not None:
+            kwargs_leg["loc"] = "center"
+            kwargs_leg["bbox_to_anchor"] = (float(pos_xy_custom[0]), float(pos_xy_custom[1]))
+        else:
+            kwargs_leg["loc"] = posicao_legenda
         if handles is not None:
             kwargs_leg["handles"] = handles
         if title_legenda is not None:
