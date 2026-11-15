@@ -264,9 +264,11 @@ def gerar_plot_bode(
             ax2.set_ylim(top=y2lim_user[1])
 
     if posicao_legenda and posicao_legenda != "Ocultar / Hide" and handles_legenda:
+        pos_xy_b = limites_manuais.get("legenda_xy") if isinstance(limites_manuais, dict) else None
+        kw_leg_b = {"loc": "center", "bbox_to_anchor": (float(pos_xy_b[0]), float(pos_xy_b[1]))} if (posicao_legenda in ["Personalizada (X, Y)", "Custom (X, Y)"] and pos_xy_b is not None) else {"loc": posicao_legenda}
         leg = ax2.legend(
             handles=handles_legenda,
-            loc=posicao_legenda,
+            **kw_leg_b,
             frameon=True,
             facecolor=tema["box_bg"],
             edgecolor=tema["box_edge"],

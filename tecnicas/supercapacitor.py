@@ -47,11 +47,11 @@ def gerar_plot_sc_2e(
         marcador = next(marcadores_ciclo)
 
         if usar_linha and usar_pontos:
-            ax.plot(c["t"], c["v"], color=cor, linewidth=1.9, linestyle=estilo, marker=marcador, markersize=4.5, markeredgecolor=tema["marker_edge"], markeredgewidth=0.5, label=rotulo, zorder=4)
+            ax.plot(c["t"], c["v"], color=cor, linewidth=1.9, linestyle=estilo, marker=marcador, markersize=4.5, markeredgecolor=tema["text"], markeredgewidth=1.0, label=rotulo, zorder=4)
         elif usar_linha:
             ax.plot(c["t"], c["v"], color=cor, linewidth=2.1, linestyle=estilo, label=rotulo, zorder=4)
         else:
-            ax.scatter(c["t"], c["v"], color=cor, s=26, marker=marcador, edgecolors=tema["marker_edge"], linewidths=0.5, label=rotulo, zorder=4)
+            ax.scatter(c["t"], c["v"], color=cor, s=26, marker=marcador, edgecolors=tema["text"], linewidths=1.0, label=rotulo, zorder=4)
 
     if exibir_densidade_corrente and texto_densidade_corrente:
         ax.text(

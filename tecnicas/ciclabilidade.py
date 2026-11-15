@@ -12,13 +12,14 @@ from core import (
 def gerar_plot_ciclabilidade(
     fonte_dados, rate_tag, pos_rate, eixo_x_label, eixo_y_label,
     mapa_cores, mapa_estilos, mapa_nomes, limites_manuais, posicao_legenda,
-    tema, idioma="Português", unidade_y=r"mAh\ g^{-1}", modo_tracado="Linhas (Lines)"
-, legenda_horizontal=False):
+    tema, idioma="Português", unidade_y=r"mAh\ g^{-1}", modo_tracado="Linhas (Lines)",
+    legenda_horizontal=False,
+):
     df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
     num_cols = df.shape[1]
     curvas = []
 
-    if num_cols >= 2 and num_cols % 2 == 0:
+    if num_cols >= 2 and num_cols % 2 == 0 and (len(tokens_limpos) == num_cols or (len(tokens_limpos) == num_cols + 1 and str(tokens_limpos[0]).lower() in ["index", "cycle"])):
         nomes_y = [tokens_limpos[k] for k in range(1, len(tokens_limpos), 2)] if len(tokens_limpos) >= 2 else tokens_limpos
         for idx, col in enumerate(range(0, num_cols, 2)):
             sub = df.iloc[:, [col, col + 1]].dropna()
@@ -126,6 +127,60 @@ def gerar_plot_ciclabilidade(
     return fig
 
 
+def extrair_dados_ciclabilidade_individual(fonte_dados, idioma="Português"):
+    """
+    Extrai (x_ciclos, y_cap, y_eff_coulombica, y_eff_energetica) de arquivos .mpr ou .txt/.dat.
+    Em arquivos .txt de 4 colunas [Cycle Index | Chg. Spec. Cap. | DChg. Spec. Cap. | Chg.-DChg. Eff(%)],
+    identifica corretamente a 3ª coluna como Capacidade de Descarga e a 4ª como Eficiência Coulômbica,
+    retornando `y_eff_energetica = None` (sem replicar indevidamente colunas de capacidade).
+    """
+    df, tokens_limpos = processar_cabecalho_e_dados(fonte_dados)
+    num_cols = df.shape[1]
+    cols_lower = [str(c).lower() for c in df.columns]
+    toks_lower = [str(t).lower() for t in tokens_limpos]
+
+    y_eff_en = None
+    if "eficiencia_energetica" in cols_lower:
+        sub = df[["Ciclo", "Cap_Descarga", "Eficiencia"]].dropna()
+        x_ciclos = sub["Ciclo"].to_numpy(float)
+        y_cap = sub["Cap_Descarga"].to_numpy(float)
+        y_eff = sub["Eficiencia"].to_numpy(float)
+        if "Eficiencia_Energetica" in df.columns:
+            cand_ee = df.loc[sub.index, "Eficiencia_Energetica"].to_numpy(float)
+            if np.any(np.isfinite(cand_ee)):
+                y_eff_en = cand_ee
+    elif num_cols >= 5:
+        sub = df.iloc[:, [0, 2, 3, 4]].dropna(subset=[df.columns[0], df.columns[2], df.columns[3]])
+        x_ciclos = sub.iloc[:, 0].to_numpy(float)
+        y_cap = sub.iloc[:, 1].to_numpy(float)
+        y_eff = sub.iloc[:, 2].to_numpy(float)
+        cand_ee = sub.iloc[:, 3].to_numpy(float)
+        if np.any(np.isfinite(cand_ee)):
+            y_eff_en = cand_ee
+    elif num_cols == 4:
+        # Estrutura padrão de ciclagem de bateria/SC em .txt:
+        # [Cycle Index | Chg. Cap. | DChg. Cap. | Eff(%)] -> 4 colunas, SEM eficiência energética!
+        sub = df.iloc[:, [0, 2, 3]].dropna()
+        x_ciclos = sub.iloc[:, 0].to_numpy(float)
+        y_cap = sub.iloc[:, 1].to_numpy(float)
+        y_eff = sub.iloc[:, 2].to_numpy(float)
+        y_eff_en = None
+    elif num_cols == 3:
+        sub = df.dropna()
+        x_ciclos = sub.iloc[:, 0].to_numpy(float)
+        y_cap = sub.iloc[:, 1].to_numpy(float)
+        y_eff = sub.iloc[:, 2].to_numpy(float)
+        y_eff_en = None
+    else:
+        raise ValueError(
+            "O arquivo para Ciclabilidade + Eficiência precisa conter ao menos 3 colunas (Ciclo, Capacidade/Capacitância e Eficiência)."
+            if idioma == "Português"
+            else "The Cyclability + Efficiency file must contain at least 3 columns (Cycle, Capacity/Capacitance, and Efficiency)."
+        )
+
+    return x_ciclos, y_cap, y_eff, y_eff_en
+
+
 def gerar_plot_ciclabilidade_eficiencia(
     fonte_dados,
     eixo_x_label,
@@ -138,26 +193,17 @@ def gerar_plot_ciclabilidade_eficiencia(
     cor_eficiencia="#2563eb",
     estilo_capacidade="--",
     estilo_eficiencia="-",
+    estilo_eficiencia_energetica="-.",
+    exibir_eficiencia_energetica=False,
     modo_tracado="Scatter + Lines",
     limites_manuais=None,
     patamar_ref=None,
     tema=None,
     idioma="Português",
-    unidade_y=r"mAh\ g^{-1}"
-, legenda_horizontal=False):
-    df, _ = processar_cabecalho_e_dados(fonte_dados)
-    num_cols = df.shape[1]
-
-    if num_cols >= 4:
-        sub = df.iloc[:, [0, 2, 3]].dropna()
-    elif num_cols == 3:
-        sub = df.dropna()
-    else:
-        raise ValueError("O arquivo para Ciclabilidade + Eficiência precisa conter ao menos 3 colunas (Ciclo, Capacidade e Eficiência).")
-
-    x_ciclos = sub.iloc[:, 0].to_numpy(float)
-    y_cap = sub.iloc[:, 1].to_numpy(float)
-    y_eff = sub.iloc[:, 2].to_numpy(float)
+    unidade_y=r"mAh\ g^{-1}",
+    legenda_horizontal=False,
+):
+    x_ciclos, y_cap, y_eff, y_eff_en = extrair_dados_ciclabilidade_individual(fonte_dados, idioma=idioma)
 
     usar_linha = ("Lines" in modo_tracado)
     usar_pontos = ("Scatter" in modo_tracado)
@@ -233,17 +279,47 @@ def gerar_plot_ciclabilidade_eficiencia(
         ax1.text(0.05, 0.08, nome_amostra, transform=ax1.transAxes, fontsize=13, fontweight="bold", color=tema["text"])
 
     ax2 = ax1.twinx()
+    lbl_ce = "Eficiência Coulômbica" if idioma == "Português" else "Coulombic Efficiency"
     if usar_linha and not usar_pontos:
-        ax2.plot(x_ciclos, y_eff, color=cor_eficiencia, linewidth=2.0, linestyle=estilo_eficiencia, zorder=6)
+        h_ce, = ax2.plot(x_ciclos, y_eff, color=cor_eficiencia, linewidth=2.0, linestyle=estilo_eficiencia, label=lbl_ce, zorder=6)
     elif usar_pontos and not usar_linha:
-        ax2.scatter(x_ciclos, y_eff, color=cor_eficiencia, s=18, marker="o", linewidths=0.0, zorder=6)
+        h_ce = ax2.scatter(x_ciclos, y_eff, color=cor_eficiencia, s=18, marker="o", linewidths=0.0, label=lbl_ce, zorder=6)
     else:
         ax2.plot(x_ciclos, y_eff, color=cor_eficiencia, linewidth=1.2, linestyle=estilo_eficiencia, alpha=0.45, zorder=5)
-        ax2.scatter(x_ciclos, y_eff, color=cor_eficiencia, s=16, marker="o", linewidths=0.0, zorder=6)
+        h_ce = ax2.scatter(x_ciclos, y_eff, color=cor_eficiencia, s=16, marker="o", linewidths=0.0, label=lbl_ce, zorder=6)
+
+    tem_ee_valida = bool(exibir_eficiencia_energetica and y_eff_en is not None and np.any(np.isfinite(y_eff_en)))
+    y2_label_final = eixo_y2_label
+    if tem_ee_valida:
+        # Quando ambas as eficiências são plotadas, usa a MESMA cor (`cor_eficiencia`) mudando apenas o símbolo ("^")
+        # e renomeia automaticamente o eixo Y2 para "Eficiências (%)" caso esteja no padrão "Eficiência Coulômbica (%)"
+        if "coulômbica" in y2_label_final.lower() or "coulombic" in y2_label_final.lower():
+            y2_label_final = r"$\mathbf{Eficiências\ (\%)}$" if idioma == "Português" else r"$\mathbf{Efficiencies\ (\%)}$"
+
+        lbl_ee = "Eficiência Energética" if idioma == "Português" else "Energy Efficiency"
+        mask_ee = np.isfinite(y_eff_en)
+        if usar_linha and not usar_pontos:
+            h_ee, = ax2.plot(x_ciclos[mask_ee], y_eff_en[mask_ee], color=cor_eficiencia, linewidth=2.0, linestyle=estilo_eficiencia_energetica, label=lbl_ee, zorder=6)
+        elif usar_pontos and not usar_linha:
+            h_ee = ax2.scatter(x_ciclos[mask_ee], y_eff_en[mask_ee], color=cor_eficiencia, s=20, marker="^", linewidths=0.0, label=lbl_ee, zorder=6)
+        else:
+            ax2.plot(x_ciclos[mask_ee], y_eff_en[mask_ee], color=cor_eficiencia, linewidth=1.2, linestyle=estilo_eficiencia_energetica, alpha=0.5, zorder=5)
+            h_ee = ax2.scatter(x_ciclos[mask_ee], y_eff_en[mask_ee], color=cor_eficiencia, s=18, marker="^", linewidths=0.0, label=lbl_ee, zorder=6)
+
+        leg_y2 = ax2.legend(
+            handles=[h_ce, h_ee],
+            loc="lower right",
+            frameon=True,
+            facecolor=tema["box_bg"],
+            edgecolor=tema["box_edge"],
+            fontsize=8.8,
+        )
+        for txt in leg_y2.get_texts():
+            txt.set_color(tema["text"])
 
     ax2.annotate("→", xy=(0.92, 0.82), xycoords="axes fraction", fontsize=14, fontweight="bold", color=cor_eficiencia)
 
-    ax2.set_ylabel(eixo_y2_label, fontsize=12.5, labelpad=8, color=cor_eficiencia)
+    ax2.set_ylabel(y2_label_final, fontsize=12.5, labelpad=8, color=cor_eficiencia)
     ax2.tick_params(axis="y", labelcolor=cor_eficiencia, width=1.4, color=cor_eficiencia)
     ax2.spines["right"].set_color(cor_eficiencia)
     ax2.spines["right"].set_linewidth(1.4)
